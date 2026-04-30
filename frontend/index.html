@@ -1,0 +1,204 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>PaperCite - 计量文献学统计工具</title>
+    <link rel="stylesheet" href="/paper-hot/static/css/style.css">
+    <script src="https://cdn.jsdelivr.net/npm/echarts@5.4.3/dist/echarts.min.js"></script>
+</head>
+<body>
+    <div class="container">
+        <header class="header">
+            <h1>📊 PaperCite</h1>
+            <p class="subtitle">计量文献学统计与分析工具</p>
+        </header>
+
+        <div class="search-section">
+            <div class="search-form">
+                <div class="input-group">
+                    <label for="keyword">关键词</label>
+                    <input type="text" id="keyword" placeholder="输入搜索关键词，如：machine learning" />
+                </div>
+                <div class="input-group">
+                    <label for="maxResults">最大结果数</label>
+                    <input type="number" id="maxResults" value="500" min="10" max="5000" />
+                </div>
+                <div class="input-group">
+                    <label for="startYear">起始年份</label>
+                    <input type="number" id="startYear" placeholder="可选" />
+                </div>
+                <div class="input-group">
+                    <label for="endYear">结束年份</label>
+                    <input type="number" id="endYear" placeholder="可选" />
+                </div>
+                <button id="searchBtn" class="btn btn-primary">🔍 搜索文献</button>
+            </div>
+            <div class="upload-section">
+                <h3>📤 或上传CSV文件</h3>
+                <div class="upload-area" id="uploadArea">
+                    <input type="file" id="fileInput" accept=".csv" style="display: none;" />
+                    <p>点击或拖拽CSV文件到此处</p>
+                </div>
+                <button id="uploadBtn" class="btn btn-secondary" style="margin-top: 10px;">选择文件</button>
+            </div>
+        </div>
+
+        <div class="status-section" id="statusSection" style="display: none;">
+            <div class="status-card">
+                <div class="status-icon" id="statusIcon">⏳</div>
+                <div class="status-text" id="statusText">正在处理...</div>
+            </div>
+        </div>
+
+        <div class="tabs-section" id="tabsSection" style="display: none;">
+            <div class="tabs">
+                <button class="tab-btn active" data-tab="overview">📈 概览</button>
+                <button class="tab-btn" data-tab="trends">📅 趋势分析</button>
+                <button class="tab-btn" data-tab="journals">📚 期刊统计</button>
+                <button class="tab-btn" data-tab="countries">🌍 国家分布</button>
+                <button class="tab-btn" data-tab="authors">👥 作者分析</button>
+                <button class="tab-btn" data-tab="concepts">🏷️ 关键词</button>
+                <button class="tab-btn" data-tab="network">🕸️ 合作网络</button>
+                <button class="tab-btn" data-tab="download">⬇️ 下载论文</button>
+            </div>
+        </div>
+
+        <div class="content-section" id="contentSection" style="display: none;">
+            <div id="overviewTab" class="tab-content active">
+                <div class="stats-grid">
+                    <div class="stat-card">
+                        <div class="stat-icon">📄</div>
+                        <div class="stat-value" id="totalPapers">0</div>
+                        <div class="stat-label">总文献数</div>
+                    </div>
+                    <div class="stat-card">
+                        <div class="stat-icon">📊</div>
+                        <div class="stat-value" id="totalCitations">0</div>
+                        <div class="stat-label">总被引频次</div>
+                    </div>
+                    <div class="stat-card">
+                        <div class="stat-icon">📚</div>
+                        <div class="stat-value" id="totalJournals">0</div>
+                        <div class="stat-label">期刊数量</div>
+                    </div>
+                    <div class="stat-card">
+                        <div class="stat-icon">👥</div>
+                        <div class="stat-value" id="totalAuthors">0</div>
+                        <div class="stat-label">作者数量</div>
+                    </div>
+                </div>
+                <div class="charts-row">
+                    <div class="chart-container">
+                        <h4>年度发表趋势</h4>
+                        <div id="yearChart" class="chart"></div>
+                    </div>
+                    <div class="chart-container">
+                        <h4>Top 10 期刊</h4>
+                        <div id="journalChartSmall" class="chart"></div>
+                    </div>
+                </div>
+                <div class="table-container">
+                    <h4>🏆 高被引论文 Top 20</h4>
+                    <table id="topCitedTable" class="data-table">
+                        <thead>
+                            <tr>
+                                <th>排名</th>
+                                <th>标题</th>
+                                <th>作者</th>
+                                <th>年份</th>
+                                <th>被引频次</th>
+                            </tr>
+                        </thead>
+                        <tbody></tbody>
+                    </table>
+                </div>
+            </div>
+
+            <div id="trendsTab" class="tab-content">
+                <div class="chart-container full-width">
+                    <h4>📅 年度发表与被引趋势</h4>
+                    <div id="trendChart" class="chart"></div>
+                </div>
+            </div>
+
+            <div id="journalsTab" class="tab-content">
+                <div class="chart-container full-width">
+                    <h4>📚 期刊分布 Top 20</h4>
+                    <div id="journalChart" class="chart"></div>
+                </div>
+            </div>
+
+            <div id="countriesTab" class="tab-content">
+                <div class="chart-container full-width">
+                    <h4>🌍 国家/地区分布 Top 20</h4>
+                    <div id="countryChart" class="chart"></div>
+                </div>
+            </div>
+
+            <div id="authorsTab" class="tab-content">
+                <div class="chart-container full-width">
+                    <div class="controls-row">
+                        <h4>👥 高产作者</h4>
+                        <div class="select-group">
+                            <label for="authorCount">显示数量:</label>
+                            <select id="authorCount">
+                                <option value="10">Top 10</option>
+                                <option value="20">Top 20</option>
+                                <option value="30">Top 30</option>
+                                <option value="50" selected>Top 50</option>
+                            </select>
+                        </div>
+                    </div>
+                    <div id="authorChart" class="chart"></div>
+                </div>
+                <div class="table-container" style="margin-top: 30px;">
+                    <h4>🏆 高被引作者 Top 20</h4>
+                    <table id="topCitedAuthorsTable" class="data-table">
+                        <thead>
+                            <tr>
+                                <th>排名</th>
+                                <th>作者</th>
+                                <th>论文数</th>
+                                <th>总被引频次</th>
+                                <th>单篇最高被引</th>
+                                <th>平均被引</th>
+                            </tr>
+                        </thead>
+                        <tbody></tbody>
+                    </table>
+                </div>
+            </div>
+
+            <div id="conceptsTab" class="tab-content">
+                <div class="chart-container full-width">
+                    <h4>🏷️ 热点关键词 Top 30</h4>
+                    <div id="conceptChart" class="chart"></div>
+                </div>
+            </div>
+
+            <div id="networkTab" class="tab-content">
+                <div class="chart-container full-width">
+                    <h4>🕸️ 作者合作网络</h4>
+                    <div id="networkChart" class="chart" style="height: 700px;"></div>
+                </div>
+            </div>
+
+            <div id="downloadTab" class="tab-content">
+                <div class="download-section">
+                    <div class="download-controls">
+                        <button id="downloadAllBtn" class="btn btn-primary">⬇️ 下载所有可下载的PDF</button>
+                        <div id="downloadAllStatus" style="margin-top: 10px;"></div>
+                    </div>
+                    <div class="papers-list-container">
+                        <h4>📄 论文列表</h4>
+                        <div id="papersList"></div>
+                    </div>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <script src="/paper-hot/static/js/app.js"></script>
+</body>
+</html>
