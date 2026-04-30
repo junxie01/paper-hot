@@ -33,7 +33,7 @@ def safe_json_response(data: Dict):
     return json.loads(json.dumps(data, cls=CustomJSONEncoder))
 
 
-app = FastAPI(title="PaperCite - 计量文献学统计工具")
+app = FastAPI(title="PaperHot - 计量文献学统计工具")
 base_prefix = "/paper-hot"
 
 BASE_DIR = Path(__file__).parent.parent
@@ -233,7 +233,7 @@ async def upload_csv(file: UploadFile = File(...)):
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
-@app.get(f"{base_prefix}/api/analysis/{filename}")
+@app.get(base_prefix + "/api/analysis/{filename}")
 async def get_analysis(filename: str, author_count: int = 50):
     try:
         csv_path = RAW_DATA_DIR / filename
@@ -383,7 +383,7 @@ def get_top_cited_authors(df):
     
     return result
 
-@app.get(f"{base_prefix}/api/network/{filename}")
+@app.get(base_prefix + "/api/network/{filename}")
 async def get_network(filename: str):
     try:
         csv_path = RAW_DATA_DIR / filename
@@ -437,7 +437,7 @@ def build_coauthorship_network(df):
         
     return {"nodes": nodes, "edges": edges}
 
-@app.get(f"{base_prefix}/api/papers/{filename}")
+@app.get(base_prefix + "/api/papers/{filename}")
 async def get_papers_list(filename: str):
     try:
         csv_path = RAW_DATA_DIR / filename
@@ -462,7 +462,7 @@ async def get_papers_list(filename: str):
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
-@app.post(f"{base_prefix}/api/download/{filename}")
+@app.post(base_prefix + "/api/download/{filename}")
 async def download_papers(filename: str):
     try:
         csv_path = RAW_DATA_DIR / filename

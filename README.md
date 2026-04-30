@@ -1,4 +1,4 @@
-# PaperCite - 计量文献学统计工具
+# PaperHot - 计量文献学统计工具
 
 一个基于 OpenAlex API 的文献搜索、数据统计和可视化工具。
 
