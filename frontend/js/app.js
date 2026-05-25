@@ -940,6 +940,7 @@ function displayNetwork(data) {
 
 function displayCitationNetwork(data) {
     const summary = document.getElementById('citationNetworkSummary');
+    const chartDom = document.getElementById('citationNetworkChart');
     const nodes = data.nodes || [];
     const edges = data.edges || [];
     const hasEdges = edges.length > 0;
@@ -948,59 +949,122 @@ function displayCitationNetwork(data) {
         ? `当前集合内 ${nodes.length} 篇文章，识别到 ${edges.length} 条集合内部引用关系`
         : `当前集合内 ${nodes.length} 篇文章，暂未识别到集合内部引用关系；下图仍按总被引数显示每篇文章`;
 
-    const chart = initChart('citationNetworkChart', 'citationNetworkChart');
-    if (!chart) return;
+    if (charts.citationNetworkChart) {
+        try {
+            charts.citationNetworkChart.dispose();
+        } catch (error) {
+            console.warn('释放引文网络图表失败:', error);
+        }
+        delete charts.citationNetworkChart;
+    }
 
-    const option = {
-        tooltip: {
-            formatter: (params) => {
-                if (params.dataType === 'edge') return '引用关系';
-                const data = params.data || {};
-                return `
-                    <strong>${escapeHtml(data.title || data.name || '')}</strong><br/>
-                    ${escapeHtml(data.authors || '')}<br/>
-                    ${escapeHtml(data.journal || '')} ${escapeHtml(formatYear(data.year))}<br/>
-                    被引: ${escapeHtml(data.value || 0)}；集合内被引: ${escapeHtml(data.internal_citations || 0)}
-                `;
-            }
-        },
-        series: [{
-            name: '引文网络',
-            type: 'graph',
-            layout: 'circular',
-            data: nodes.map(node => ({
-                ...node,
-                symbolSize: 14 + (Math.sqrt(Number(node.value) || 0) / Math.sqrt(maxCitations)) * 46
-            })),
-            links: edges,
-            roam: true,
-            draggable: true,
-            edgeSymbol: ['none', 'arrow'],
-            edgeSymbolSize: 8,
-            label: {
-                show: nodes.length <= 60,
-                formatter: (params) => {
-                    const title = params.data.title || params.data.name || '';
-                    return title.length > 28 ? `${title.slice(0, 28)}...` : title;
-                },
-                fontSize: 9
-            },
-            emphasis: {
-                focus: 'adjacency',
-                label: { show: true, formatter: '{b}', fontSize: 10 }
-            },
-            lineStyle: {
-                color: '#777',
-                width: 1,
-                opacity: 0.55,
-                curveness: 0.18
-            },
-            itemStyle: { color: '#2e7d59' },
-            circular: { rotateLabel: false }
-        }]
-    };
+    chartDom.replaceChildren();
 
-    chart.setOption(option);
+    if (!nodes.length) {
+        chartDom.innerHTML = '<div class="chart-placeholder">当前集合没有可显示的文章</div>';
+        return;
+    }
+
+    renderCitationSvg(chartDom, nodes, edges, maxCitations);
+}
+
+function renderCitationSvg(container, nodes, edges, maxCitations) {
+    const width = 1100;
+    const height = 540;
+    const centerX = width / 2;
+    const centerY = height / 2;
+    const radius = Math.min(width, height) * 0.36;
+    const svgNs = 'http://www.w3.org/2000/svg';
+    const svg = document.createElementNS(svgNs, 'svg');
+    svg.setAttribute('viewBox', `0 0 ${width} ${height}`);
+    svg.setAttribute('class', 'citation-svg');
+    svg.setAttribute('role', 'img');
+
+    const defs = document.createElementNS(svgNs, 'defs');
+    const marker = document.createElementNS(svgNs, 'marker');
+    marker.setAttribute('id', 'citationArrow');
+    marker.setAttribute('markerWidth', '10');
+    marker.setAttribute('markerHeight', '10');
+    marker.setAttribute('refX', '8');
+    marker.setAttribute('refY', '3');
+    marker.setAttribute('orient', 'auto');
+    marker.setAttribute('markerUnits', 'strokeWidth');
+    const arrowPath = document.createElementNS(svgNs, 'path');
+    arrowPath.setAttribute('d', 'M0,0 L0,6 L9,3 z');
+    arrowPath.setAttribute('fill', '#7b8794');
+    marker.appendChild(arrowPath);
+    defs.appendChild(marker);
+    svg.appendChild(defs);
+
+    const nodePositions = new Map();
+    nodes.forEach((node, index) => {
+        const angle = (Math.PI * 2 * index / nodes.length) - Math.PI / 2;
+        const x = centerX + radius * Math.cos(angle);
+        const y = centerY + radius * Math.sin(angle);
+        const size = 12 + (Math.sqrt(Number(node.value) || 0) / Math.sqrt(maxCitations)) * 30;
+        nodePositions.set(node.id, { x, y, r: size });
+    });
+
+    const edgeGroup = document.createElementNS(svgNs, 'g');
+    edgeGroup.setAttribute('class', 'citation-edges');
+    edges.forEach(edge => {
+        const source = nodePositions.get(edge.source);
+        const target = nodePositions.get(edge.target);
+        if (!source || !target) return;
+
+        const dx = target.x - source.x;
+        const dy = target.y - source.y;
+        const distance = Math.max(Math.sqrt(dx * dx + dy * dy), 1);
+        const startX = source.x + (dx / distance) * source.r;
+        const startY = source.y + (dy / distance) * source.r;
+        const endX = target.x - (dx / distance) * (target.r + 4);
+        const endY = target.y - (dy / distance) * (target.r + 4);
+
+        const line = document.createElementNS(svgNs, 'line');
+        line.setAttribute('x1', startX);
+        line.setAttribute('y1', startY);
+        line.setAttribute('x2', endX);
+        line.setAttribute('y2', endY);
+        line.setAttribute('class', 'citation-edge');
+        line.setAttribute('marker-end', 'url(#citationArrow)');
+        edgeGroup.appendChild(line);
+    });
+    svg.appendChild(edgeGroup);
+
+    const nodeGroup = document.createElementNS(svgNs, 'g');
+    nodeGroup.setAttribute('class', 'citation-nodes');
+    nodes.forEach(node => {
+        const position = nodePositions.get(node.id);
+        if (!position) return;
+
+        const group = document.createElementNS(svgNs, 'g');
+        group.setAttribute('class', 'citation-node');
+
+        const title = document.createElementNS(svgNs, 'title');
+        title.textContent = `${node.title || node.name}\n${node.authors || ''}\n${node.journal || ''} ${formatYear(node.year)}\n被引: ${node.value || 0}; 集合内被引: ${node.internal_citations || 0}`;
+        group.appendChild(title);
+
+        const circle = document.createElementNS(svgNs, 'circle');
+        circle.setAttribute('cx', position.x);
+        circle.setAttribute('cy', position.y);
+        circle.setAttribute('r', position.r);
+        circle.setAttribute('class', 'citation-node-circle');
+        group.appendChild(circle);
+
+        const label = document.createElementNS(svgNs, 'text');
+        label.setAttribute('x', position.x);
+        label.setAttribute('y', position.y + position.r + 14);
+        label.setAttribute('text-anchor', 'middle');
+        label.setAttribute('class', 'citation-node-label');
+        const titleText = node.title || node.name || '';
+        label.textContent = titleText.length > 24 ? `${titleText.slice(0, 24)}...` : titleText;
+        group.appendChild(label);
+
+        nodeGroup.appendChild(group);
+    });
+    svg.appendChild(nodeGroup);
+
+    container.appendChild(svg);
 }
 
 function switchTab(tabName) {
