@@ -1,4 +1,5 @@
 const BASE_PATH = '/paper-hot';
+const STATE_STORAGE_KEY = 'paperHot.currentState';
 let currentFilename = null;
 let currentData = null;
 let currentPapers = [];
@@ -11,6 +12,7 @@ let charts = {};
 
 document.addEventListener('DOMContentLoaded', () => {
     setupEventListeners();
+    restoreSavedSession();
 });
 
 function setupEventListeners() {
@@ -100,6 +102,60 @@ function escapeHtml(value) {
 function formatYear(value) {
     if (value === null || value === undefined || value === '' || value === 'nan') return '';
     return String(value).replace(/\.0$/, '');
+}
+
+function getSavedState() {
+    try {
+        return JSON.parse(localStorage.getItem(STATE_STORAGE_KEY) || '{}');
+    } catch (error) {
+        console.warn('读取保存状态失败:', error);
+        return {};
+    }
+}
+
+function saveAppState(extra = {}) {
+    const state = {
+        filename: currentFilename,
+        activeTab: getActiveTabName(),
+        filters: {
+            text: document.getElementById('paperTextFilter')?.value || '',
+            startYear: document.getElementById('paperStartYearFilter')?.value || '',
+            endYear: document.getElementById('paperEndYearFilter')?.value || '',
+            oa: document.getElementById('paperOaFilter')?.value || 'all'
+        },
+        authorCount: document.getElementById('authorCount')?.value || '50',
+        ...extra
+    };
+    if (!state.filename) return;
+    localStorage.setItem(STATE_STORAGE_KEY, JSON.stringify(state));
+}
+
+function restoreFilters(filters = {}) {
+    document.getElementById('paperTextFilter').value = filters.text || '';
+    document.getElementById('paperStartYearFilter').value = filters.startYear || '';
+    document.getElementById('paperEndYearFilter').value = filters.endYear || '';
+    document.getElementById('paperOaFilter').value = filters.oa || 'all';
+}
+
+async function restoreSavedSession() {
+    const state = getSavedState();
+    if (!state.filename) return;
+
+    if (state.authorCount) {
+        document.getElementById('authorCount').value = state.authorCount;
+    }
+    restoreFilters(state.filters);
+
+    try {
+        await loadAnalysis(state.filename, {
+            resetFilters: false,
+            activeTab: state.activeTab || 'overview',
+            restoring: true
+        });
+    } catch (error) {
+        console.warn('恢复上次状态失败:', error);
+        localStorage.removeItem(STATE_STORAGE_KEY);
+    }
 }
 
 function openAddPaperModal() {
@@ -251,10 +307,15 @@ async function searchPapers() {
     }
 }
 
-async function loadAnalysis(filename) {
+async function loadAnalysis(filename, options = {}) {
+    const {
+        resetFilters = true,
+        activeTab = getActiveTabName(),
+        restoring = false
+    } = options;
     currentFilename = filename;
     
-    showStatus('⏳', '正在分析数据...');
+    showStatus('⏳', restoring ? '正在恢复上次状态...' : '正在分析数据...');
     
     try {
         const authorCount = parseInt(document.getElementById('authorCount').value) || 50;
@@ -267,16 +328,29 @@ async function loadAnalysis(filename) {
         currentData = result.analysis;
         currentNetworkData = null;
         currentCitationNetworkData = null;
-        resetPaperFilters();
+        if (resetFilters) {
+            resetPaperFilters();
+        }
         document.getElementById('tabsSection').style.display = 'block';
         document.getElementById('contentSection').style.display = 'block';
 
         await loadPapersList(filename);
         displayAnalysis(result.analysis);
         await Promise.all([loadNetwork(filename), loadCitationNetwork(filename)]);
-        renderChartsForTab(getActiveTabName());
+        switchTab(activeTab || 'overview', { skipSave: true });
+        renderChartsForTab(activeTab || 'overview');
+        saveAppState({ activeTab: activeTab || 'overview' });
         hideStatus();
     } catch (error) {
+        if (restoring) {
+            console.warn('恢复上次状态失败:', error);
+            localStorage.removeItem(STATE_STORAGE_KEY);
+            currentFilename = null;
+            document.getElementById('tabsSection').style.display = 'none';
+            document.getElementById('contentSection').style.display = 'none';
+            hideStatus();
+            return;
+        }
         showStatus('❌', '分析失败: ' + error.message);
     }
 }
@@ -285,6 +359,7 @@ async function reloadAuthorChart() {
     if (!currentFilename || !currentData) return;
     
     const authorCount = parseInt(document.getElementById('authorCount').value) || 50;
+    saveAppState();
     
     try {
         const response = await fetch(`${BASE_PATH}/api/analysis/${encodeFilename(currentFilename)}?author_count=${authorCount}`);
@@ -373,6 +448,7 @@ function applyPaperFilters() {
     });
 
     renderAllPapersTable(filteredPapers);
+    saveAppState();
 }
 
 function clearPaperFilters() {
@@ -949,125 +1025,123 @@ function displayCitationNetwork(data) {
         ? `当前集合内 ${nodes.length} 篇文章，识别到 ${edges.length} 条集合内部引用关系`
         : `当前集合内 ${nodes.length} 篇文章，暂未识别到集合内部引用关系；下图仍按总被引数显示每篇文章`;
 
-    if (charts.citationNetworkChart) {
-        try {
-            charts.citationNetworkChart.dispose();
-        } catch (error) {
-            console.warn('释放引文网络图表失败:', error);
-        }
-        delete charts.citationNetworkChart;
-    }
-
-    chartDom.replaceChildren();
+    renderCitationDetails(nodes, edges);
 
     if (!nodes.length) {
+        if (charts.citationNetworkChart) {
+            try {
+                charts.citationNetworkChart.dispose();
+            } catch (error) {
+                console.warn('释放引文网络图表失败:', error);
+            }
+            delete charts.citationNetworkChart;
+        }
         chartDom.innerHTML = '<div class="chart-placeholder">当前集合没有可显示的文章</div>';
         return;
     }
 
-    renderCitationSvg(chartDom, nodes, edges, maxCitations);
+    const chart = initChart('citationNetworkChart', 'citationNetworkChart');
+    if (!chart) return;
+
+    const option = {
+        tooltip: {
+            formatter: (params) => {
+                if (params.dataType === 'edge') return '引用关系';
+                const item = params.data || {};
+                return `
+                    <strong>${escapeHtml(item.title || item.name || '')}</strong><br/>
+                    ${escapeHtml(item.authors || '')}<br/>
+                    ${escapeHtml(item.journal || '')} ${escapeHtml(formatYear(item.year))}<br/>
+                    被引: ${escapeHtml(item.value || 0)}；集合内被引: ${escapeHtml(item.internal_citations || 0)}
+                `;
+            }
+        },
+        legend: { data: ['论文'] },
+        series: [{
+            name: '论文',
+            type: 'graph',
+            layout: 'force',
+            data: nodes.map(node => {
+                const title = node.title || node.name || '无标题';
+                return {
+                    ...node,
+                    id: node.id,
+                    name: title.length > 34 ? `${title.slice(0, 34)}...` : title,
+                    category: 0,
+                    symbolSize: 16 + (Math.sqrt(Number(node.value) || 0) / Math.sqrt(maxCitations)) * 46
+                };
+            }),
+            links: edges,
+            categories: [{ name: '论文' }],
+            roam: true,
+            draggable: true,
+            edgeSymbol: ['none', 'arrow'],
+            edgeSymbolSize: 8,
+            label: {
+                show: true,
+                position: 'right',
+                formatter: '{b}',
+                fontSize: 10
+            },
+            lineStyle: {
+                color: '#7b8794',
+                opacity: 0.65,
+                curveness: 0.2
+            },
+            force: {
+                repulsion: 280,
+                edgeLength: 150,
+                gravity: 0.12
+            },
+            itemStyle: { color: '#2e7d59' }
+        }]
+    };
+
+    chart.setOption(option);
+    chart.resize();
 }
 
-function renderCitationSvg(container, nodes, edges, maxCitations) {
-    const width = 1100;
-    const height = 540;
-    const centerX = width / 2;
-    const centerY = height / 2;
-    const radius = Math.min(width, height) * 0.36;
-    const svgNs = 'http://www.w3.org/2000/svg';
-    const svg = document.createElementNS(svgNs, 'svg');
-    svg.setAttribute('viewBox', `0 0 ${width} ${height}`);
-    svg.setAttribute('class', 'citation-svg');
-    svg.setAttribute('role', 'img');
+function renderCitationDetails(nodes, edges) {
+    const container = document.getElementById('citationNetworkDetails');
+    const nodeById = new Map(nodes.map(node => [node.id, node]));
+    const topNodes = [...nodes]
+        .sort((a, b) => (Number(b.value) || 0) - (Number(a.value) || 0))
+        .slice(0, 12);
+    const edgeItems = edges.slice(0, 20);
 
-    const defs = document.createElementNS(svgNs, 'defs');
-    const marker = document.createElementNS(svgNs, 'marker');
-    marker.setAttribute('id', 'citationArrow');
-    marker.setAttribute('markerWidth', '10');
-    marker.setAttribute('markerHeight', '10');
-    marker.setAttribute('refX', '8');
-    marker.setAttribute('refY', '3');
-    marker.setAttribute('orient', 'auto');
-    marker.setAttribute('markerUnits', 'strokeWidth');
-    const arrowPath = document.createElementNS(svgNs, 'path');
-    arrowPath.setAttribute('d', 'M0,0 L0,6 L9,3 z');
-    arrowPath.setAttribute('fill', '#7b8794');
-    marker.appendChild(arrowPath);
-    defs.appendChild(marker);
-    svg.appendChild(defs);
+    const paperItems = topNodes.map(node => `
+        <div class="citation-detail-item">
+            <strong>${escapeHtml(node.title || node.name || '无标题')}</strong>
+            <div class="citation-detail-meta">被引 ${escapeHtml(node.value || 0)} · 集合内被引 ${escapeHtml(node.internal_citations || 0)} · ${escapeHtml(formatYear(node.year))}</div>
+        </div>
+    `).join('');
 
-    const nodePositions = new Map();
-    nodes.forEach((node, index) => {
-        const angle = (Math.PI * 2 * index / nodes.length) - Math.PI / 2;
-        const x = centerX + radius * Math.cos(angle);
-        const y = centerY + radius * Math.sin(angle);
-        const size = 12 + (Math.sqrt(Number(node.value) || 0) / Math.sqrt(maxCitations)) * 30;
-        nodePositions.set(node.id, { x, y, r: size });
-    });
+    const edgeHtml = edgeItems.length
+        ? edgeItems.map(edge => {
+            const source = nodeById.get(edge.source);
+            const target = nodeById.get(edge.target);
+            return `
+                <div class="citation-detail-item">
+                    ${escapeHtml(source?.title || source?.name || edge.source)}
+                    <div class="citation-detail-meta">引用 → ${escapeHtml(target?.title || target?.name || edge.target)}</div>
+                </div>
+            `;
+        }).join('')
+        : '<div class="citation-detail-item">当前集合内部没有匹配到引用边，但上方仍显示论文节点。</div>';
 
-    const edgeGroup = document.createElementNS(svgNs, 'g');
-    edgeGroup.setAttribute('class', 'citation-edges');
-    edges.forEach(edge => {
-        const source = nodePositions.get(edge.source);
-        const target = nodePositions.get(edge.target);
-        if (!source || !target) return;
-
-        const dx = target.x - source.x;
-        const dy = target.y - source.y;
-        const distance = Math.max(Math.sqrt(dx * dx + dy * dy), 1);
-        const startX = source.x + (dx / distance) * source.r;
-        const startY = source.y + (dy / distance) * source.r;
-        const endX = target.x - (dx / distance) * (target.r + 4);
-        const endY = target.y - (dy / distance) * (target.r + 4);
-
-        const line = document.createElementNS(svgNs, 'line');
-        line.setAttribute('x1', startX);
-        line.setAttribute('y1', startY);
-        line.setAttribute('x2', endX);
-        line.setAttribute('y2', endY);
-        line.setAttribute('class', 'citation-edge');
-        line.setAttribute('marker-end', 'url(#citationArrow)');
-        edgeGroup.appendChild(line);
-    });
-    svg.appendChild(edgeGroup);
-
-    const nodeGroup = document.createElementNS(svgNs, 'g');
-    nodeGroup.setAttribute('class', 'citation-nodes');
-    nodes.forEach(node => {
-        const position = nodePositions.get(node.id);
-        if (!position) return;
-
-        const group = document.createElementNS(svgNs, 'g');
-        group.setAttribute('class', 'citation-node');
-
-        const title = document.createElementNS(svgNs, 'title');
-        title.textContent = `${node.title || node.name}\n${node.authors || ''}\n${node.journal || ''} ${formatYear(node.year)}\n被引: ${node.value || 0}; 集合内被引: ${node.internal_citations || 0}`;
-        group.appendChild(title);
-
-        const circle = document.createElementNS(svgNs, 'circle');
-        circle.setAttribute('cx', position.x);
-        circle.setAttribute('cy', position.y);
-        circle.setAttribute('r', position.r);
-        circle.setAttribute('class', 'citation-node-circle');
-        group.appendChild(circle);
-
-        const label = document.createElementNS(svgNs, 'text');
-        label.setAttribute('x', position.x);
-        label.setAttribute('y', position.y + position.r + 14);
-        label.setAttribute('text-anchor', 'middle');
-        label.setAttribute('class', 'citation-node-label');
-        const titleText = node.title || node.name || '';
-        label.textContent = titleText.length > 24 ? `${titleText.slice(0, 24)}...` : titleText;
-        group.appendChild(label);
-
-        nodeGroup.appendChild(group);
-    });
-    svg.appendChild(nodeGroup);
-
-    container.appendChild(svg);
+    container.innerHTML = `
+        <div class="citation-detail-panel">
+            <h5>高被引节点</h5>
+            <div class="citation-detail-list">${paperItems || '<div class="citation-detail-item">没有论文节点</div>'}</div>
+        </div>
+        <div class="citation-detail-panel">
+            <h5>集合内引用关系</h5>
+            <div class="citation-detail-list">${edgeHtml}</div>
+        </div>
+    `;
 }
 
-function switchTab(tabName) {
+function switchTab(tabName, options = {}) {
     console.log('切换到标签:', tabName);
     
     // 移除所有激活状态
@@ -1100,6 +1174,10 @@ function switchTab(tabName) {
             }
         });
     }, 100);
+
+    if (!options.skipSave) {
+        saveAppState({ activeTab: tabName });
+    }
 }
 
 function showStatus(icon, text) {
