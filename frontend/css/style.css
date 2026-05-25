@@ -64,6 +64,12 @@ body {
     text-decoration: underline;
 }
 
+.privacy-note {
+    margin: 6px 0 12px;
+    color: #667085;
+    font-size: 0.92rem;
+}
+
 .search-section {
     background: white;
     border-radius: 20px;
@@ -959,6 +965,71 @@ body {
     white-space: nowrap;
 }
 
+.admin-panel {
+    background: white;
+    border-radius: 20px;
+    padding: 30px;
+    box-shadow: 0 10px 40px rgba(0, 0, 0, 0.1);
+}
+
+.admin-login {
+    display: flex;
+    gap: 16px;
+    align-items: flex-end;
+    max-width: 720px;
+}
+
+.admin-toolbar {
+    justify-content: space-between;
+    align-items: center;
+    gap: 18px;
+    margin-bottom: 16px;
+}
+
+.admin-toolbar h3 {
+    margin-bottom: 4px;
+}
+
+.admin-summary {
+    color: #666;
+    font-size: 0.95rem;
+}
+
+.admin-actions,
+.admin-row-actions {
+    display: flex;
+    gap: 8px;
+    flex-wrap: wrap;
+}
+
+.admin-status {
+    min-height: 24px;
+    margin: 12px 0;
+    color: #555;
+}
+
+.admin-status.success {
+    color: #2e7d59;
+}
+
+.admin-status.error {
+    color: #c0392b;
+}
+
+.admin-table-wrap {
+    border: 1px solid #e5e7eb;
+}
+
+.admin-table th:nth-child(2),
+.admin-table td:nth-child(2) {
+    min-width: 280px;
+}
+
+.admin-table th:nth-child(6),
+.admin-table td:nth-child(6) {
+    min-width: 230px;
+}
+
 @media (max-width: 900px) {
     .filters-grid {
         grid-template-columns: 1fr 1fr;
@@ -970,6 +1041,12 @@ body {
 
     .add-paper-search {
         grid-template-columns: 1fr;
+    }
+
+    .admin-login,
+    .admin-toolbar {
+        align-items: stretch;
+        flex-direction: column;
     }
 }
 

@@ -1,0 +1,58 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>PaperHot 管理员</title>
+    <link rel="stylesheet" href="/paper-hot/static/css/style.css?v=20260525-10">
+</head>
+<body>
+    <div class="container">
+        <header class="header">
+            <h1>PaperHot 管理员</h1>
+            <p class="subtitle">查看和管理服务器上的 CSV 文件</p>
+        </header>
+
+        <section class="admin-panel">
+            <div class="admin-login" id="adminLogin">
+                <div class="input-group">
+                    <label for="adminPassword">管理员密码</label>
+                    <input type="password" id="adminPassword" placeholder="输入服务器上配置的密码" autocomplete="current-password">
+                </div>
+                <button id="adminLoginBtn" class="btn btn-primary">进入管理</button>
+            </div>
+
+            <div class="admin-toolbar" id="adminToolbar" style="display: none;">
+                <div>
+                    <h3>CSV 文件</h3>
+                    <p id="adminSummary" class="admin-summary"></p>
+                </div>
+                <div class="admin-actions">
+                    <button id="adminRefreshBtn" class="btn btn-secondary">刷新</button>
+                    <button id="adminLogoutBtn" class="btn btn-danger">退出</button>
+                </div>
+            </div>
+
+            <div id="adminStatus" class="admin-status"></div>
+
+            <div class="table-scroll admin-table-wrap" id="adminTableWrap" style="display: none;">
+                <table class="data-table admin-table">
+                    <thead>
+                        <tr>
+                            <th>来源</th>
+                            <th>文件名</th>
+                            <th>行数</th>
+                            <th>大小</th>
+                            <th>更新时间</th>
+                            <th>操作</th>
+                        </tr>
+                    </thead>
+                    <tbody id="adminFilesBody"></tbody>
+                </table>
+            </div>
+        </section>
+    </div>
+
+    <script src="/paper-hot/static/js/admin.js?v=20260525-10"></script>
+</body>
+</html>
