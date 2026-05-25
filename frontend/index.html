@@ -4,7 +4,7 @@
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>PaperHot - 计量文献学统计工具</title>
-    <link rel="stylesheet" href="/paper-hot/static/css/style.css?v=20260525-5">
+    <link rel="stylesheet" href="/paper-hot/static/css/style.css?v=20260525-6">
     <script src="https://cdn.jsdelivr.net/npm/echarts@5.4.3/dist/echarts.min.js"></script>
 </head>
 <body>
@@ -238,6 +238,16 @@
             <div id="citationTab" class="tab-content">
                 <div class="chart-container full-width">
                     <h4>🔗 引文网络</h4>
+                    <div class="network-controls">
+                        <label for="citationNetworkLimit">显示论文数</label>
+                        <select id="citationNetworkLimit">
+                            <option value="10">前 10 篇</option>
+                            <option value="50" selected>前 50 篇</option>
+                            <option value="100">前 100 篇</option>
+                            <option value="200">前 200 篇</option>
+                            <option value="500">前 500 篇</option>
+                        </select>
+                    </div>
                     <div id="citationNetworkSummary" class="network-summary"></div>
                     <div id="citationNetworkChart" class="chart" style="height: 700px;"></div>
                     <div id="citationNetworkDetails" class="citation-network-details"></div>
@@ -278,6 +288,6 @@
         </div>
     </div>
 
-    <script src="/paper-hot/static/js/app.js?v=20260525-5"></script>
+    <script src="/paper-hot/static/js/app.js?v=20260525-6"></script>
 </body>
 </html>

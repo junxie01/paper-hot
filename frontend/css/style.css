@@ -280,6 +280,24 @@ body {
     text-align: center;
 }
 
+.network-controls {
+    margin: -4px 0 12px;
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    color: #555;
+    font-size: 0.94rem;
+}
+
+.network-controls select {
+    min-width: 120px;
+    padding: 7px 10px;
+    border: 1px solid #d7dee8;
+    border-radius: 8px;
+    background: #ffffff;
+    color: #333;
+}
+
 .svg-network {
     display: block;
     width: 100%;

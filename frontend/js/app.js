@@ -27,6 +27,7 @@ function setupEventListeners() {
     document.getElementById('paperStartYearFilter').addEventListener('input', applyPaperFilters);
     document.getElementById('paperEndYearFilter').addEventListener('input', applyPaperFilters);
     document.getElementById('paperOaFilter').addEventListener('change', applyPaperFilters);
+    document.getElementById('citationNetworkLimit').addEventListener('change', handleCitationNetworkLimitChange);
     document.getElementById('clearPaperFiltersBtn').addEventListener('click', clearPaperFilters);
     document.getElementById('deleteSelectedBtn').addEventListener('click', deleteSelectedPapers);
     document.getElementById('selectAllPapers').addEventListener('change', toggleSelectAllPapers);
@@ -155,6 +156,7 @@ function saveAppState(extra = {}) {
             oa: document.getElementById('paperOaFilter')?.value || 'all'
         },
         authorCount: document.getElementById('authorCount')?.value || '50',
+        citationLimit: document.getElementById('citationNetworkLimit')?.value || '50',
         ...extra
     };
     if (!state.filename) return;
@@ -168,6 +170,12 @@ function restoreFilters(filters = {}) {
     document.getElementById('paperOaFilter').value = filters.oa || 'all';
 }
 
+function restoreCitationLimit(value) {
+    const limitSelect = document.getElementById('citationNetworkLimit');
+    const allowedValues = new Set(['10', '50', '100', '200', '500']);
+    limitSelect.value = allowedValues.has(String(value)) ? String(value) : '50';
+}
+
 async function restoreSavedSession() {
     const state = getSavedState();
     if (!state.filename) return;
@@ -175,6 +183,7 @@ async function restoreSavedSession() {
     if (state.authorCount) {
         document.getElementById('authorCount').value = state.authorCount;
     }
+    restoreCitationLimit(state.citationLimit);
     restoreFilters(state.filters);
 
     try {
@@ -204,6 +213,18 @@ function closeAddPaperModal() {
 
 function getActiveTabName() {
     return document.querySelector('.tab-btn.active')?.dataset.tab || 'overview';
+}
+
+function getCitationDisplayLimit() {
+    const value = parseInt(document.getElementById('citationNetworkLimit')?.value, 10);
+    return [10, 50, 100, 200, 500].includes(value) ? value : 50;
+}
+
+function handleCitationNetworkLimitChange() {
+    if (currentCitationNetworkData) {
+        displayCitationNetwork(currentCitationNetworkData);
+    }
+    saveAppState();
 }
 
 function initChart(chartId, chartKey) {
@@ -1209,6 +1230,31 @@ function displayNetwork(data) {
     chart.setOption(option);
 }
 
+function limitCitationNetwork(nodes, edges, limit) {
+    const visibleNodes = [...nodes]
+        .sort((a, b) => {
+            const citationDelta = (Number(b.value) || 0) - (Number(a.value) || 0);
+            if (citationDelta !== 0) return citationDelta;
+            return String(a.title || a.name || '').localeCompare(String(b.title || b.name || ''));
+        })
+        .slice(0, Math.min(limit, nodes.length));
+    const visibleKeys = new Set();
+
+    visibleNodes.forEach(node => {
+        if (node.id !== undefined && node.id !== null) {
+            visibleKeys.add(String(node.id));
+        }
+        if (node.name) visibleKeys.add(String(node.name));
+        if (node.title) visibleKeys.add(String(node.title));
+    });
+
+    const visibleEdges = edges.filter(edge => (
+        visibleKeys.has(String(edge.source)) && visibleKeys.has(String(edge.target))
+    ));
+
+    return { nodes: visibleNodes, edges: visibleEdges };
+}
+
 function buildCitationGraphData(nodes, edges) {
     const usedNames = new Map();
     const usedLabels = new Map();
@@ -1276,12 +1322,19 @@ function displayCitationNetwork(data) {
     const chartDom = document.getElementById('citationNetworkChart');
     const nodes = data.nodes || [];
     const edges = data.edges || [];
-    const hasEdges = edges.length > 0;
+    const limit = getCitationDisplayLimit();
+    const visibleNetwork = limitCitationNetwork(nodes, edges, limit);
+    const visibleNodes = visibleNetwork.nodes;
+    const visibleEdges = visibleNetwork.edges;
+    const hasEdges = visibleEdges.length > 0;
+    const visibleCountText = visibleNodes.length < nodes.length
+        ? `显示按被引排序前 ${visibleNodes.length} / ${nodes.length} 篇文章`
+        : `显示全部 ${nodes.length} 篇文章`;
     summary.textContent = hasEdges
-        ? `当前集合内 ${nodes.length} 篇文章，识别到 ${edges.length} 条集合内部引用关系`
-        : `当前集合内 ${nodes.length} 篇文章，暂未识别到集合内部引用关系；下图仍按总被引数显示每篇文章`;
+        ? `${visibleCountText}，图中 ${visibleEdges.length} / ${edges.length} 条集合内部引用关系`
+        : `${visibleCountText}，当前显示范围内暂未识别到集合内部引用关系；节点仍按总被引数显示`;
 
-    renderCitationDetails(nodes, edges);
+    renderCitationDetails(visibleNodes, visibleEdges);
 
     if (!nodes.length) {
         if (charts.citationNetworkChart) {
@@ -1296,7 +1349,7 @@ function displayCitationNetwork(data) {
         return;
     }
 
-    const graphData = buildCitationGraphData(nodes, edges);
+    const graphData = buildCitationGraphData(visibleNodes, visibleEdges);
 
     if (typeof echarts === 'undefined') {
         renderSvgNetwork('citationNetworkChart', graphData.nodes, graphData.edges, {
