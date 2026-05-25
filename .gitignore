@@ -36,6 +36,7 @@ env/
 data/papers/*.pdf
 data/raw/*.csv
 !data/raw/example_data.csv
+data/processed/backups/*.csv
 
 # Logs
 *.log

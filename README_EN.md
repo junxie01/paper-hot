@@ -11,8 +11,11 @@ A literature search, data statistics, and visualization tool based on the OpenAl
 - 👥 High-yield and highly cited authors analysis
 - 🏷️ Hot keyword analysis
 - 🕸️ Author collaboration network visualization
+- 🔗 Citation network visualization
+- ✂️ Filter, delete, and extend a working paper collection
 - 📄 Paper list and PDF download
 - 📤 CSV file upload analysis
+- ➕ Add individual papers by title search
 - 📦 Batch download packaged as ZIP
 
 ## Quick Start (Cross-Platform)

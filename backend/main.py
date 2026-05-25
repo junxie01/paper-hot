@@ -14,10 +14,18 @@ from pathlib import Path
 import asyncio
 from concurrent.futures import ThreadPoolExecutor
 import uuid
+import shutil
+from datetime import datetime
+import io
 
 
 class CustomJSONEncoder(json.JSONEncoder):
     def default(self, obj):
+        try:
+            if pd.isna(obj):
+                return None
+        except Exception:
+            pass
         if isinstance(obj, np.floating):
             if np.isnan(obj):
                 return None
@@ -40,20 +48,192 @@ BASE_DIR = Path(__file__).parent.parent
 DATA_DIR = BASE_DIR / "data"
 RAW_DATA_DIR = DATA_DIR / "raw"
 PROCESSED_DATA_DIR = DATA_DIR / "processed"
+BACKUP_DATA_DIR = PROCESSED_DATA_DIR / "backups"
 PAPERS_DIR = DATA_DIR / "papers"
 FRONTEND_DIR = BASE_DIR / "frontend"
 
 RAW_DATA_DIR.mkdir(parents=True, exist_ok=True)
 PROCESSED_DATA_DIR.mkdir(parents=True, exist_ok=True)
+BACKUP_DATA_DIR.mkdir(parents=True, exist_ok=True)
 PAPERS_DIR.mkdir(parents=True, exist_ok=True)
 
 app.mount(f"{base_prefix}/static", StaticFiles(directory=str(FRONTEND_DIR)), name="static")
+
+PAPER_COLUMNS = [
+    "id",
+    "doi",
+    "title",
+    "journal",
+    "year",
+    "publication_date",
+    "authors",
+    "affiliations",
+    "countries",
+    "cited_by_count",
+    "references_count",
+    "references",
+    "concepts",
+    "abstract",
+    "type",
+    "is_open_access",
+    "pdf_url",
+]
 
 class SearchRequest(BaseModel):
     keyword: str
     max_results: int = 500
     start_year: Optional[int] = None
     end_year: Optional[int] = None
+
+class TitleSearchRequest(BaseModel):
+    title: str
+    max_results: int = 8
+
+class DeletePapersRequest(BaseModel):
+    indices: List[int]
+
+class AppendPapersRequest(BaseModel):
+    papers: List[Dict[str, Any]]
+
+def get_csv_path(filename: str) -> Path:
+    safe_name = Path(filename).name
+    if not safe_name or safe_name != filename or not safe_name.endswith(".csv"):
+        raise HTTPException(status_code=400, detail="Invalid CSV filename")
+    return RAW_DATA_DIR / safe_name
+
+def normalize_open_access(value: Any) -> bool:
+    if isinstance(value, bool):
+        return value
+    text = str(value).strip().lower()
+    return text in {"true", "1", "yes", "y", "open", "oa"}
+
+def normalize_papers_df(df: pd.DataFrame) -> pd.DataFrame:
+    df = df.copy()
+    for column in PAPER_COLUMNS:
+        if column not in df.columns:
+            df[column] = ""
+
+    df = df[PAPER_COLUMNS]
+    df["cited_by_count"] = pd.to_numeric(df["cited_by_count"], errors="coerce").fillna(0).astype(int)
+    df["references_count"] = pd.to_numeric(df["references_count"], errors="coerce").fillna(0).astype(int)
+    df["year"] = pd.to_numeric(df["year"], errors="coerce").astype("Int64")
+    df["references"] = df["references"].apply(lambda value: "[]" if pd.isna(value) or str(value).strip() == "" else value)
+    df["is_open_access"] = df["is_open_access"].apply(normalize_open_access)
+    text_columns = [
+        "id",
+        "doi",
+        "title",
+        "journal",
+        "publication_date",
+        "authors",
+        "affiliations",
+        "countries",
+        "references",
+        "concepts",
+        "abstract",
+        "type",
+        "pdf_url",
+    ]
+    for column in text_columns:
+        df[column] = df[column].fillna("").astype(str)
+    return df
+
+def read_papers_csv(filename: str) -> pd.DataFrame:
+    csv_path = get_csv_path(filename)
+    if not csv_path.exists():
+        raise HTTPException(status_code=404, detail="File not found")
+    return normalize_papers_df(pd.read_csv(csv_path))
+
+def backup_csv_file(csv_path: Path) -> Optional[Path]:
+    if not csv_path.exists():
+        return None
+    timestamp = datetime.now().strftime("%Y%m%d%H%M%S")
+    backup_name = f"{csv_path.stem}_{timestamp}_{uuid.uuid4().hex[:6]}.csv"
+    backup_path = BACKUP_DATA_DIR / backup_name
+    shutil.copy2(csv_path, backup_path)
+    return backup_path
+
+def write_papers_csv(filename: str, df: pd.DataFrame, create_backup: bool = True) -> Optional[Path]:
+    csv_path = get_csv_path(filename)
+    backup_path = backup_csv_file(csv_path) if create_backup else None
+    normalized_df = normalize_papers_df(df)
+    normalized_df.to_csv(csv_path, index=False, encoding="utf-8-sig")
+    return backup_path
+
+def normalize_doi(value: Any) -> str:
+    text = str(value).strip().lower()
+    if not text or text == "nan":
+        return ""
+    return text.replace("https://doi.org/", "").replace("http://doi.org/", "")
+
+def normalize_title(value: Any) -> str:
+    text = str(value).strip().lower()
+    if not text or text == "nan":
+        return ""
+    return " ".join(text.split())
+
+def paper_identity(row: pd.Series) -> Optional[str]:
+    openalex_id = str(row.get("id", "")).strip().lower()
+    if openalex_id and openalex_id != "nan":
+        return f"id:{openalex_id}"
+
+    doi = normalize_doi(row.get("doi", ""))
+    if doi:
+        return f"doi:{doi}"
+
+    title = normalize_title(row.get("title", ""))
+    if title:
+        return f"title:{title}"
+
+    return None
+
+def dedupe_papers(df: pd.DataFrame) -> tuple[pd.DataFrame, int]:
+    seen = set()
+    rows = []
+    skipped = 0
+    for _, row in normalize_papers_df(df).iterrows():
+        identity = paper_identity(row)
+        if identity and identity in seen:
+            skipped += 1
+            continue
+        if identity:
+            seen.add(identity)
+        rows.append(row)
+    return pd.DataFrame(rows, columns=PAPER_COLUMNS).reset_index(drop=True), skipped
+
+def parse_references(value: Any) -> List[str]:
+    if isinstance(value, list):
+        return [str(item) for item in value if str(item).strip()]
+    if pd.isna(value):
+        return []
+    text = str(value).strip()
+    if not text or text == "nan":
+        return []
+    try:
+        parsed = json.loads(text)
+        if isinstance(parsed, list):
+            return [str(item) for item in parsed if str(item).strip()]
+    except Exception:
+        pass
+    return [part.strip() for part in text.split(";") if part.strip()]
+
+def get_total_stats(df: pd.DataFrame) -> Dict[str, int]:
+    journals = df["journal"].dropna().astype(str).str.strip()
+    journals = journals[(journals != "") & (journals.str.lower() != "nan")]
+
+    authors = set()
+    for authors_text in df["authors"].dropna():
+        for author in str(authors_text).split(";"):
+            clean_author = author.strip()
+            if clean_author and clean_author.lower() != "nan":
+                authors.add(clean_author)
+
+    return {
+        "total_papers": int(len(df)),
+        "total_citations": int(pd.to_numeric(df["cited_by_count"], errors="coerce").fillna(0).sum()),
+        "total_journals": int(journals.nunique()),
+        "total_authors": int(len(authors)),
+    }
 
 @app.get(base_prefix)
 @app.get(f"{base_prefix}/")
@@ -67,16 +247,24 @@ async def read_root_redirect():
 @app.post(f"{base_prefix}/api/search")
 async def search_papers(request: SearchRequest):
     try:
+        max_results = max(1, min(request.max_results, 5000))
         papers = fetch_from_openalex(
             keyword=request.keyword,
-            max_results=request.max_results,
+            max_results=max_results,
             start_year=request.start_year,
             end_year=request.end_year
         )
         
         df = pd.DataFrame(papers)
-        csv_path = RAW_DATA_DIR / f"{request.keyword.replace(' ', '_')}_papers.csv"
-        df.to_csv(csv_path, index=False, encoding='utf-8-sig')
+        safe_keyword = "".join(
+            c if c.isalnum() or c in (" ", "-", "_") else "_"
+            for c in request.keyword
+        ).strip().replace(" ", "_")
+        if not safe_keyword:
+            safe_keyword = f"search_{uuid.uuid4().hex[:8]}"
+        filename = f"{safe_keyword}_papers.csv"
+        csv_path = get_csv_path(filename)
+        write_papers_csv(filename, df, create_backup=csv_path.exists())
         
         result = {
             "success": True,
@@ -85,6 +273,8 @@ async def search_papers(request: SearchRequest):
             "csv_path": str(csv_path)
         }
         return safe_json_response(result)
+    except HTTPException:
+        raise
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
@@ -110,7 +300,7 @@ def fetch_from_openalex(keyword: str, max_results: int, start_year: Optional[int
             "page": page
         }
         
-        response = requests.get(base_url, params=params)
+        response = requests.get(base_url, params=params, timeout=30)
         response.raise_for_status()
         data = response.json()
         
@@ -126,6 +316,31 @@ def fetch_from_openalex(keyword: str, max_results: int, start_year: Optional[int
             break
             
     return papers[:max_results]
+
+def search_title_from_openalex(title: str, max_results: int = 8) -> List[Dict[str, Any]]:
+    base_url = "https://api.openalex.org/works"
+    params = {
+        "filter": f"title.search:{title}",
+        "per-page": max(1, min(max_results, 25))
+    }
+    response = requests.get(base_url, params=params, timeout=30)
+    response.raise_for_status()
+    data = response.json()
+    return [extract_paper_info(work) for work in data.get("results", [])]
+
+@app.post(f"{base_prefix}/api/title-search")
+async def title_search(request: TitleSearchRequest):
+    try:
+        if not request.title.strip():
+            raise HTTPException(status_code=400, detail="Title is required")
+
+        papers = search_title_from_openalex(request.title.strip(), request.max_results)
+        result = {"success": True, "count": len(papers), "papers": papers}
+        return safe_json_response(result)
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
 
 def extract_paper_info(work: Dict[str, Any]) -> Dict[str, Any]:
     authors = []
@@ -157,7 +372,7 @@ def extract_paper_info(work: Dict[str, Any]) -> Dict[str, Any]:
     except Exception:
         pass
     
-    open_access = work.get("open_access", {})
+    open_access = work.get("open_access", {}) or {}
     
     # 获取期刊名称，尝试多个可能的字段
     journal_name = ""
@@ -213,11 +428,12 @@ def extract_paper_info(work: Dict[str, Any]) -> Dict[str, Any]:
 @app.post(f"{base_prefix}/api/upload")
 async def upload_csv(file: UploadFile = File(...)):
     try:
-        if not file.filename.endswith('.csv'):
+        original_name = Path(file.filename or "upload.csv").name
+        if not original_name.lower().endswith('.csv'):
             raise HTTPException(status_code=400, detail="Only CSV files are allowed")
         
         file_uuid = str(uuid.uuid4())[:8]
-        safe_filename = f"upload_{file_uuid}_{file.filename.replace(' ', '_')}"
+        safe_filename = f"upload_{file_uuid}_{original_name.replace(' ', '_')}"
         csv_path = RAW_DATA_DIR / safe_filename
         
         contents = await file.read()
@@ -230,19 +446,18 @@ async def upload_csv(file: UploadFile = File(...)):
             "message": "File uploaded successfully"
         }
         return safe_json_response(result)
+    except HTTPException:
+        raise
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
 @app.get(base_prefix + "/api/analysis/{filename}")
 async def get_analysis(filename: str, author_count: int = 50):
     try:
-        csv_path = RAW_DATA_DIR / filename
-        if not csv_path.exists():
-            raise HTTPException(status_code=404, detail="File not found")
-            
-        df = pd.read_csv(csv_path)
+        df = read_papers_csv(filename)
         
         analysis = {
+            "total_stats": get_total_stats(df),
             "yearly_stats": get_yearly_stats(df),
             "journal_stats": get_journal_stats(df),
             "country_stats": get_country_stats(df),
@@ -254,6 +469,8 @@ async def get_analysis(filename: str, author_count: int = 50):
         
         result = {"success": True, "analysis": analysis}
         return safe_json_response(result)
+    except HTTPException:
+        raise
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
@@ -386,15 +603,13 @@ def get_top_cited_authors(df):
 @app.get(base_prefix + "/api/network/{filename}")
 async def get_network(filename: str):
     try:
-        csv_path = RAW_DATA_DIR / filename
-        if not csv_path.exists():
-            raise HTTPException(status_code=404, detail="File not found")
-            
-        df = pd.read_csv(csv_path)
+        df = read_papers_csv(filename)
         network_data = build_coauthorship_network(df)
         
         result = {"success": True, "network": network_data}
         return safe_json_response(result)
+    except HTTPException:
+        raise
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
@@ -404,19 +619,15 @@ def build_coauthorship_network(df):
     for idx, row in df.iterrows():
         authors = str(row["authors"]).split(";")
         authors = [a.strip() for a in authors if a.strip()]
+
+        for author in authors:
+            if author not in G:
+                G.add_node(author, size=1)
+            else:
+                G.nodes[author]["size"] += 1
         
         for i, author1 in enumerate(authors):
-            if author1 not in G:
-                G.add_node(author1, size=1)
-            else:
-                G.nodes[author1]["size"] += 1
-                
             for author2 in authors[i+1:]:
-                if author2 not in G:
-                    G.add_node(author2, size=1)
-                else:
-                    G.nodes[author2]["size"] += 1
-                    
                 if G.has_edge(author1, author2):
                     G[author1][author2]["weight"] += 1
                 else:
@@ -437,14 +648,78 @@ def build_coauthorship_network(df):
         
     return {"nodes": nodes, "edges": edges}
 
+@app.get(base_prefix + "/api/citation-network/{filename}")
+async def get_citation_network(filename: str):
+    try:
+        df = read_papers_csv(filename)
+        network_data = build_citation_network(df)
+
+        result = {"success": True, "network": network_data}
+        return safe_json_response(result)
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+def build_citation_network(df):
+    nodes = []
+    edges = []
+    openalex_to_node = {}
+
+    for idx, row in df.iterrows():
+        openalex_id = str(row.get("id", "")).strip()
+        node_id = openalex_id if openalex_id and openalex_id.lower() != "nan" else f"row_{idx}"
+        if openalex_id and openalex_id.lower() != "nan":
+            openalex_to_node[openalex_id] = node_id
+
+        cited_by = row.get("cited_by_count", 0)
+        try:
+            cited_by = int(float(cited_by))
+        except (ValueError, TypeError):
+            cited_by = 0
+
+        year = row.get("year", "")
+        nodes.append({
+            "id": node_id,
+            "name": str(row.get("title", "")) or f"Untitled {idx + 1}",
+            "title": str(row.get("title", "")),
+            "authors": str(row.get("authors", "")),
+            "journal": str(row.get("journal", "")),
+            "year": "" if pd.isna(year) else str(year),
+            "value": cited_by,
+            "index": int(idx),
+        })
+
+    internal_citation_counts = {node["id"]: 0 for node in nodes}
+    seen_edges = set()
+
+    for idx, row in df.iterrows():
+        source_openalex_id = str(row.get("id", "")).strip()
+        source_node = source_openalex_id if source_openalex_id and source_openalex_id.lower() != "nan" else f"row_{idx}"
+        for reference in parse_references(row.get("references", "")):
+            target_node = openalex_to_node.get(reference)
+            if not target_node or target_node == source_node:
+                continue
+            edge_key = (source_node, target_node)
+            if edge_key in seen_edges:
+                continue
+            seen_edges.add(edge_key)
+            internal_citation_counts[target_node] = internal_citation_counts.get(target_node, 0) + 1
+            edges.append({
+                "source": source_node,
+                "target": target_node,
+                "value": 1,
+            })
+
+    for node in nodes:
+        node["internal_citations"] = internal_citation_counts.get(node["id"], 0)
+
+    return {"nodes": nodes, "edges": edges}
+
 @app.get(base_prefix + "/api/papers/{filename}")
 async def get_papers_list(filename: str):
     try:
-        csv_path = RAW_DATA_DIR / filename
-        if not csv_path.exists():
-            raise HTTPException(status_code=404, detail="File not found")
-            
-        df = pd.read_csv(csv_path)
+        df = read_papers_csv(filename)
         
         papers = []
         for idx, row in df.iterrows():
@@ -452,24 +727,106 @@ async def get_papers_list(filename: str):
             papers.append({
                 "index": idx,
                 "title": str(row.get("title", "")),
+                "journal": str(row.get("journal", "")),
+                "year": "" if pd.isna(row.get("year", "")) else str(row.get("year", "")),
                 "authors": str(row.get("authors", "")),
+                "cited_by_count": int(row.get("cited_by_count", 0)),
+                "doi": str(row.get("doi", "")),
+                "is_open_access": bool(row.get("is_open_access", False)),
                 "pdf_url": str(row.get("pdf_url", "")),
                 "has_pdf": has_pdf
             })
         
         result = {"success": True, "papers": papers}
         return safe_json_response(result)
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+@app.post(base_prefix + "/api/papers/{filename}/delete")
+async def delete_papers(filename: str, request: DeletePapersRequest):
+    try:
+        df = read_papers_csv(filename)
+        valid_indices = sorted({idx for idx in request.indices if 0 <= idx < len(df)})
+        if not valid_indices:
+            raise HTTPException(status_code=400, detail="No valid paper indices provided")
+
+        updated_df = df.drop(index=valid_indices).reset_index(drop=True)
+        backup_path = write_papers_csv(filename, updated_df, create_backup=True)
+
+        result = {
+            "success": True,
+            "deleted": len(valid_indices),
+            "count": len(updated_df),
+            "backup_path": str(backup_path) if backup_path else None,
+        }
+        return safe_json_response(result)
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+@app.post(base_prefix + "/api/papers/{filename}/append")
+async def append_papers(filename: str, request: AppendPapersRequest):
+    try:
+        if not request.papers:
+            raise HTTPException(status_code=400, detail="No papers provided")
+
+        current_df = read_papers_csv(filename)
+        incoming_df = normalize_papers_df(pd.DataFrame(request.papers))
+        combined_df = pd.concat([current_df, incoming_df], ignore_index=True)
+        deduped_df, _ = dedupe_papers(combined_df)
+        added = max(len(deduped_df) - len(current_df), 0)
+        skipped = max(len(incoming_df) - added, 0)
+        backup_path = write_papers_csv(filename, deduped_df, create_backup=True)
+
+        result = {
+            "success": True,
+            "added": added,
+            "skipped": skipped,
+            "count": len(deduped_df),
+            "backup_path": str(backup_path) if backup_path else None,
+        }
+        return safe_json_response(result)
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+@app.post(base_prefix + "/api/papers/{filename}/append-csv")
+async def append_csv_to_collection(filename: str, file: UploadFile = File(...)):
+    try:
+        original_name = Path(file.filename or "upload.csv").name
+        if not original_name.lower().endswith(".csv"):
+            raise HTTPException(status_code=400, detail="Only CSV files are allowed")
+
+        current_df = read_papers_csv(filename)
+        contents = await file.read()
+        incoming_df = normalize_papers_df(pd.read_csv(io.BytesIO(contents)))
+        combined_df = pd.concat([current_df, incoming_df], ignore_index=True)
+        deduped_df, _ = dedupe_papers(combined_df)
+        added = max(len(deduped_df) - len(current_df), 0)
+        skipped = max(len(incoming_df) - added, 0)
+        backup_path = write_papers_csv(filename, deduped_df, create_backup=True)
+
+        result = {
+            "success": True,
+            "added": added,
+            "skipped": skipped,
+            "count": len(deduped_df),
+            "backup_path": str(backup_path) if backup_path else None,
+        }
+        return safe_json_response(result)
+    except HTTPException:
+        raise
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
 @app.post(base_prefix + "/api/download/{filename}")
 async def download_papers(filename: str):
     try:
-        csv_path = RAW_DATA_DIR / filename
-        if not csv_path.exists():
-            raise HTTPException(status_code=404, detail="File not found")
-            
-        df = pd.read_csv(csv_path)
+        df = read_papers_csv(filename)
         df = df[df["pdf_url"].notna() & (df["pdf_url"] != "")]
         
         # 创建临时目录
@@ -496,6 +853,8 @@ async def download_papers(filename: str):
         
         # 如果没有下载到任何文件
         if not downloaded:
+            if temp_dir.exists():
+                temp_dir.rmdir()
             return safe_json_response({"success": False, "message": "没有可下载的 PDF"})
         
         # 创建 ZIP 文件
@@ -517,6 +876,8 @@ async def download_papers(filename: str):
             filename=zip_filename,
             media_type='application/zip'
         )
+    except HTTPException:
+        raise
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
@@ -529,6 +890,8 @@ async def list_files():
             "files": [{"name": f.name, "path": str(f)} for f in files]
         }
         return safe_json_response(result)
+    except HTTPException:
+        raise
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 

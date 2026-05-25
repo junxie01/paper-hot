@@ -2,6 +2,9 @@ const BASE_PATH = '/paper-hot';
 let currentFilename = null;
 let currentData = null;
 let currentPapers = [];
+let filteredPapers = [];
+let selectedPaperIndices = new Set();
+let titleSearchResults = [];
 let charts = {};
 
 document.addEventListener('DOMContentLoaded', () => {
@@ -15,6 +18,28 @@ function setupEventListeners() {
     document.getElementById('uploadArea').addEventListener('click', () => document.getElementById('fileInput').click());
     document.getElementById('authorCount').addEventListener('change', reloadAuthorChart);
     document.getElementById('downloadAllBtn').addEventListener('click', downloadAllPapers);
+    document.getElementById('papersList').addEventListener('click', handleDownloadListClick);
+    document.getElementById('paperTextFilter').addEventListener('input', applyPaperFilters);
+    document.getElementById('paperStartYearFilter').addEventListener('input', applyPaperFilters);
+    document.getElementById('paperEndYearFilter').addEventListener('input', applyPaperFilters);
+    document.getElementById('paperOaFilter').addEventListener('change', applyPaperFilters);
+    document.getElementById('clearPaperFiltersBtn').addEventListener('click', clearPaperFilters);
+    document.getElementById('deleteSelectedBtn').addEventListener('click', deleteSelectedPapers);
+    document.getElementById('selectAllPapers').addEventListener('change', toggleSelectAllPapers);
+    document.getElementById('allPapersTable').addEventListener('change', handlePaperTableChange);
+    document.getElementById('allPapersTable').addEventListener('click', handlePaperTableClick);
+    document.getElementById('openAddPaperBtn').addEventListener('click', openAddPaperModal);
+    document.getElementById('closeAddPaperModalBtn').addEventListener('click', closeAddPaperModal);
+    document.getElementById('searchTitleBtn').addEventListener('click', searchTitleCandidates);
+    document.getElementById('titleSearchInput').addEventListener('keydown', (e) => {
+        if (e.key === 'Enter') searchTitleCandidates();
+    });
+    document.getElementById('appendCsvBtn').addEventListener('click', () => document.getElementById('appendCsvInput').click());
+    document.getElementById('appendCsvInput').addEventListener('change', handleAppendCsvSelect);
+    document.getElementById('titleSearchResults').addEventListener('click', handleTitleSearchResultClick);
+    document.getElementById('addPaperModal').addEventListener('click', (e) => {
+        if (e.target.id === 'addPaperModal') closeAddPaperModal();
+    });
     
     // 拖拽上传
     const uploadArea = document.getElementById('uploadArea');
@@ -57,15 +82,46 @@ function setupEventListeners() {
     });
 }
 
+function encodeFilename(filename) {
+    return encodeURIComponent(filename);
+}
+
+function escapeHtml(value) {
+    return String(value ?? '')
+        .replace(/&/g, '&amp;')
+        .replace(/</g, '&lt;')
+        .replace(/>/g, '&gt;')
+        .replace(/"/g, '&quot;')
+        .replace(/'/g, '&#039;');
+}
+
+function formatYear(value) {
+    if (value === null || value === undefined || value === '' || value === 'nan') return '';
+    return String(value).replace(/\.0$/, '');
+}
+
+function openAddPaperModal() {
+    if (!currentFilename) {
+        alert('请先搜索或上传一个CSV文件');
+        return;
+    }
+    document.getElementById('addPaperModal').style.display = 'flex';
+    document.getElementById('titleSearchInput').focus();
+}
+
+function closeAddPaperModal() {
+    document.getElementById('addPaperModal').style.display = 'none';
+}
+
 async function handleFileSelect(event) {
-    const file = event.target.files[0];
+    const file = event.target?.files?.[0] || event?.[0];
     if (file) {
         await uploadFile(file);
     }
 }
 
 async function uploadFile(file) {
-    if (!file.name.endsWith('.csv')) {
+    if (!file.name.toLowerCase().endsWith('.csv')) {
         alert('请上传CSV文件');
         return;
     }
@@ -141,13 +197,14 @@ async function loadAnalysis(filename) {
     
     try {
         const authorCount = parseInt(document.getElementById('authorCount').value) || 50;
-        const response = await fetch(`${BASE_PATH}/api/analysis/${filename}?author_count=${authorCount}`);
+        const response = await fetch(`${BASE_PATH}/api/analysis/${encodeFilename(filename)}?author_count=${authorCount}`);
         const result = await response.json();
         
         if (result.success) {
             currentData = result.analysis;
             displayAnalysis(result.analysis);
             loadNetwork(filename);
+            loadCitationNetwork(filename);
             loadPapersList(filename);
             hideStatus();
             document.getElementById('tabsSection').style.display = 'block';
@@ -164,7 +221,7 @@ async function reloadAuthorChart() {
     const authorCount = parseInt(document.getElementById('authorCount').value) || 50;
     
     try {
-        const response = await fetch(`${BASE_PATH}/api/analysis/${currentFilename}?author_count=${authorCount}`);
+        const response = await fetch(`${BASE_PATH}/api/analysis/${encodeFilename(currentFilename)}?author_count=${authorCount}`);
         const result = await response.json();
         
         if (result.success) {
@@ -178,12 +235,14 @@ async function reloadAuthorChart() {
 
 async function loadPapersList(filename) {
     try {
-        const response = await fetch(`${BASE_PATH}/api/papers/${filename}`);
+        const response = await fetch(`${BASE_PATH}/api/papers/${encodeFilename(filename)}`);
         const result = await response.json();
         
         if (result.success) {
             currentPapers = result.papers;
+            selectedPaperIndices.clear();
             displayPapersList(result.papers);
+            applyPaperFilters();
         }
     } catch (error) {
         console.error('加载论文列表失败:', error);
@@ -195,15 +254,276 @@ function displayPapersList(papers) {
     container.innerHTML = papers.map(paper => `
         <div class="paper-item">
             <div class="paper-info">
-                <div class="paper-title">${paper.title || '无标题'}</div>
-                <div class="paper-authors">${paper.authors || '无作者'}</div>
+                <div class="paper-title">${escapeHtml(paper.title || '无标题')}</div>
+                <div class="paper-authors">${escapeHtml(paper.authors || '无作者')}</div>
             </div>
             ${paper.has_pdf 
-                ? `<button class="paper-btn download" onclick="downloadSinglePaper('${paper.pdf_url}', '${paper.title}')">下载PDF</button>`
+                ? `<button class="paper-btn download" data-url="${escapeHtml(paper.pdf_url)}" data-title="${escapeHtml(paper.title)}">下载PDF</button>`
                 : `<button class="paper-btn unavailable" disabled>不可下载</button>`
             }
         </div>
     `).join('');
+}
+
+function handleDownloadListClick(event) {
+    const button = event.target.closest('.paper-btn.download');
+    if (!button) return;
+    downloadSinglePaper(button.dataset.url, button.dataset.title);
+}
+
+function applyPaperFilters() {
+    const text = document.getElementById('paperTextFilter').value.trim().toLowerCase();
+    const startYear = parseInt(document.getElementById('paperStartYearFilter').value);
+    const endYear = parseInt(document.getElementById('paperEndYearFilter').value);
+    const oaFilter = document.getElementById('paperOaFilter').value;
+
+    filteredPapers = currentPapers.filter(paper => {
+        const haystack = [
+            paper.title,
+            paper.authors,
+            paper.journal,
+            paper.doi
+        ].join(' ').toLowerCase();
+
+        if (text && !haystack.includes(text)) return false;
+
+        const year = parseInt(paper.year);
+        if (!Number.isNaN(startYear) && (Number.isNaN(year) || year < startYear)) return false;
+        if (!Number.isNaN(endYear) && (Number.isNaN(year) || year > endYear)) return false;
+
+        if (oaFilter === 'oa' && !paper.is_open_access) return false;
+        if (oaFilter === 'closed' && paper.is_open_access) return false;
+
+        return true;
+    });
+
+    renderAllPapersTable(filteredPapers);
+}
+
+function clearPaperFilters() {
+    document.getElementById('paperTextFilter').value = '';
+    document.getElementById('paperStartYearFilter').value = '';
+    document.getElementById('paperEndYearFilter').value = '';
+    document.getElementById('paperOaFilter').value = 'all';
+    applyPaperFilters();
+}
+
+function renderAllPapersTable(papers) {
+    const tbody = document.querySelector('#allPapersTable tbody');
+    const summary = document.getElementById('paperFilterSummary');
+    summary.textContent = `显示 ${papers.length} / ${currentPapers.length} 篇，已选 ${selectedPaperIndices.size} 篇`;
+
+    if (!papers.length) {
+        tbody.innerHTML = `<tr><td colspan="8" class="muted-cell">没有匹配的文章</td></tr>`;
+        document.getElementById('selectAllPapers').checked = false;
+        return;
+    }
+
+    tbody.innerHTML = papers.map(paper => {
+        const index = Number(paper.index);
+        const checked = selectedPaperIndices.has(index) ? 'checked' : '';
+        return `
+            <tr>
+                <td><input type="checkbox" class="paper-select" data-index="${index}" ${checked} /></td>
+                <td>
+                    <div class="paper-title-cell">${escapeHtml(paper.title || '无标题')}</div>
+                    <div class="muted-cell">${escapeHtml(paper.doi || '')}</div>
+                </td>
+                <td>${escapeHtml(paper.authors || '')}</td>
+                <td>${escapeHtml(paper.journal || '')}</td>
+                <td>${escapeHtml(formatYear(paper.year))}</td>
+                <td>${escapeHtml(paper.cited_by_count ?? 0)}</td>
+                <td>${paper.is_open_access ? '是' : '否'}</td>
+                <td><button class="btn btn-danger btn-small delete-paper-btn" data-index="${index}">删除</button></td>
+            </tr>
+        `;
+    }).join('');
+
+    const visibleIndices = papers.map(paper => Number(paper.index));
+    document.getElementById('selectAllPapers').checked =
+        visibleIndices.length > 0 && visibleIndices.every(index => selectedPaperIndices.has(index));
+}
+
+function handlePaperTableChange(event) {
+    const checkbox = event.target.closest('.paper-select');
+    if (!checkbox) return;
+
+    const index = Number(checkbox.dataset.index);
+    if (checkbox.checked) {
+        selectedPaperIndices.add(index);
+    } else {
+        selectedPaperIndices.delete(index);
+    }
+    renderAllPapersTable(filteredPapers);
+}
+
+function handlePaperTableClick(event) {
+    const deleteButton = event.target.closest('.delete-paper-btn');
+    if (!deleteButton) return;
+
+    const index = Number(deleteButton.dataset.index);
+    if (!Number.isNaN(index) && confirm('确定删除这篇文献吗？')) {
+        deletePapers([index]);
+    }
+}
+
+function toggleSelectAllPapers(event) {
+    const checked = event.target.checked;
+    filteredPapers.forEach(paper => {
+        const index = Number(paper.index);
+        if (checked) {
+            selectedPaperIndices.add(index);
+        } else {
+            selectedPaperIndices.delete(index);
+        }
+    });
+    renderAllPapersTable(filteredPapers);
+}
+
+async function deleteSelectedPapers() {
+    const indices = Array.from(selectedPaperIndices);
+    if (!indices.length) {
+        alert('请先选择要删除的文献');
+        return;
+    }
+    if (!confirm(`确定删除选中的 ${indices.length} 篇文献吗？`)) return;
+    await deletePapers(indices);
+}
+
+async function deletePapers(indices) {
+    try {
+        showStatus('⏳', '正在删除文献...');
+        const response = await fetch(`${BASE_PATH}/api/papers/${encodeFilename(currentFilename)}/delete`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ indices })
+        });
+        const result = await response.json();
+        if (!response.ok || !result.success) {
+            throw new Error(result.detail || result.message || '删除失败');
+        }
+        selectedPaperIndices.clear();
+        showStatus('✅', `已删除 ${result.deleted} 篇文献`);
+        setTimeout(() => loadAnalysis(currentFilename), 500);
+    } catch (error) {
+        showStatus('❌', '删除失败: ' + error.message);
+    }
+}
+
+async function searchTitleCandidates() {
+    const title = document.getElementById('titleSearchInput').value.trim();
+    const status = document.getElementById('titleSearchStatus');
+    const resultsContainer = document.getElementById('titleSearchResults');
+
+    if (!title) {
+        status.textContent = '请输入文章题目';
+        return;
+    }
+
+    status.textContent = '正在搜索...';
+    resultsContainer.innerHTML = '';
+
+    try {
+        const response = await fetch(`${BASE_PATH}/api/title-search`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ title, max_results: 8 })
+        });
+        const result = await response.json();
+        if (!response.ok || !result.success) {
+            throw new Error(result.detail || '搜索失败');
+        }
+
+        titleSearchResults = result.papers || [];
+        status.textContent = `找到 ${titleSearchResults.length} 个候选结果`;
+        renderTitleSearchResults();
+    } catch (error) {
+        status.textContent = '搜索失败: ' + error.message;
+    }
+}
+
+function renderTitleSearchResults() {
+    const container = document.getElementById('titleSearchResults');
+    if (!titleSearchResults.length) {
+        container.innerHTML = '<div class="muted-cell">没有候选结果</div>';
+        return;
+    }
+
+    container.innerHTML = titleSearchResults.map((paper, index) => `
+        <div class="candidate-paper">
+            <div>
+                <div class="candidate-title">${escapeHtml(paper.title || '无标题')}</div>
+                <div class="candidate-meta">
+                    ${escapeHtml(formatYear(paper.year))} · ${escapeHtml(paper.journal || '未知期刊')} · 被引 ${escapeHtml(paper.cited_by_count || 0)}
+                </div>
+                <div class="candidate-meta">${escapeHtml(paper.authors || '')}</div>
+            </div>
+            <button class="btn btn-primary btn-small add-candidate-btn" data-index="${index}">添加</button>
+        </div>
+    `).join('');
+}
+
+async function handleTitleSearchResultClick(event) {
+    const button = event.target.closest('.add-candidate-btn');
+    if (!button) return;
+
+    const index = Number(button.dataset.index);
+    const paper = titleSearchResults[index];
+    if (!paper) return;
+
+    try {
+        button.disabled = true;
+        button.textContent = '添加中...';
+        const response = await fetch(`${BASE_PATH}/api/papers/${encodeFilename(currentFilename)}/append`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ papers: [paper] })
+        });
+        const result = await response.json();
+        if (!response.ok || !result.success) {
+            throw new Error(result.detail || '添加失败');
+        }
+
+        document.getElementById('titleSearchStatus').textContent =
+            `新增 ${result.added} 篇，跳过 ${result.skipped} 篇重复记录`;
+        await loadAnalysis(currentFilename);
+    } catch (error) {
+        document.getElementById('titleSearchStatus').textContent = '添加失败: ' + error.message;
+    } finally {
+        button.disabled = false;
+        button.textContent = '添加';
+    }
+}
+
+async function handleAppendCsvSelect(event) {
+    const file = event.target.files[0];
+    if (!file) return;
+
+    const status = document.getElementById('titleSearchStatus');
+    if (!file.name.toLowerCase().endsWith('.csv')) {
+        status.textContent = '请导入CSV文件';
+        return;
+    }
+
+    const formData = new FormData();
+    formData.append('file', file);
+    status.textContent = '正在导入CSV...';
+
+    try {
+        const response = await fetch(`${BASE_PATH}/api/papers/${encodeFilename(currentFilename)}/append-csv`, {
+            method: 'POST',
+            body: formData
+        });
+        const result = await response.json();
+        if (!response.ok || !result.success) {
+            throw new Error(result.detail || '导入失败');
+        }
+        status.textContent = `新增 ${result.added} 篇，跳过 ${result.skipped} 篇重复记录`;
+        event.target.value = '';
+        await loadAnalysis(currentFilename);
+    } catch (error) {
+        status.textContent = '导入失败: ' + error.message;
+    }
 }
 
 async function downloadSinglePaper(url, title) {
@@ -224,10 +544,20 @@ async function downloadAllPapers() {
     statusEl.innerHTML = '<p>⏳ 正在准备下载...</p>';
     
     try {
-        const response = await fetch(`${BASE_PATH}/api/download/${currentFilename}`, { method: 'POST' });
+        const response = await fetch(`${BASE_PATH}/api/download/${encodeFilename(currentFilename)}`, { method: 'POST' });
         
         if (!response.ok) {
             throw new Error('下载失败');
+        }
+
+        const contentType = response.headers.get('Content-Type') || '';
+        if (contentType.includes('application/json')) {
+            const result = await response.json();
+            if (!result.success) {
+                throw new Error(result.message || '没有可下载的 PDF');
+            }
+            statusEl.innerHTML = '<p>✅ 下载完成！</p>';
+            return;
         }
         
         // 获取文件名
@@ -259,7 +589,7 @@ async function downloadAllPapers() {
 
 async function loadNetwork(filename) {
     try {
-        const response = await fetch(`${BASE_PATH}/api/network/${filename}`);
+        const response = await fetch(`${BASE_PATH}/api/network/${encodeFilename(filename)}`);
         const result = await response.json();
         
         if (result.success) {
@@ -270,11 +600,25 @@ async function loadNetwork(filename) {
     }
 }
 
+async function loadCitationNetwork(filename) {
+    try {
+        const response = await fetch(`${BASE_PATH}/api/citation-network/${encodeFilename(filename)}`);
+        const result = await response.json();
+
+        if (result.success) {
+            displayCitationNetwork(result.network);
+        }
+    } catch (error) {
+        console.error('加载引文网络失败:', error);
+    }
+}
+
 function displayAnalysis(analysis) {
-    const totalPapers = analysis.yearly_stats.reduce((sum, y) => sum + y.count, 0);
-    const totalCitations = analysis.yearly_stats.reduce((sum, y) => sum + y.citations, 0);
-    const totalJournals = analysis.journal_stats.length;
-    const totalAuthors = analysis.author_stats.length;
+    const totals = analysis.total_stats || {};
+    const totalPapers = totals.total_papers ?? analysis.yearly_stats.reduce((sum, y) => sum + y.count, 0);
+    const totalCitations = totals.total_citations ?? analysis.yearly_stats.reduce((sum, y) => sum + y.citations, 0);
+    const totalJournals = totals.total_journals ?? analysis.journal_stats.length;
+    const totalAuthors = totals.total_authors ?? analysis.author_stats.length;
     
     document.getElementById('totalPapers').textContent = totalPapers;
     document.getElementById('totalCitations').textContent = totalCitations.toLocaleString();
@@ -297,11 +641,11 @@ function renderTopCitedAuthorsTable(data) {
     tbody.innerHTML = data.map((d, i) => `
         <tr>
             <td>${i + 1}</td>
-            <td>${d.author}</td>
-            <td>${d.paper_count}</td>
-            <td>${d.total_citations}</td>
-            <td>${d.max_citations}</td>
-            <td>${d.avg_citations.toFixed(1)}</td>
+            <td>${escapeHtml(d.author)}</td>
+            <td>${escapeHtml(d.paper_count)}</td>
+            <td>${escapeHtml(d.total_citations)}</td>
+            <td>${escapeHtml(d.max_citations)}</td>
+            <td>${escapeHtml(d.avg_citations.toFixed(1))}</td>
         </tr>
     `).join('');
 }
@@ -358,10 +702,10 @@ function renderTopCitedTable(data) {
     tbody.innerHTML = data.map((d, i) => `
         <tr>
             <td>${i + 1}</td>
-            <td>${d.title}</td>
-            <td>${d.authors}</td>
-            <td>${d.year}</td>
-            <td>${d.cited_by_count}</td>
+            <td>${escapeHtml(d.title)}</td>
+            <td>${escapeHtml(d.authors)}</td>
+            <td>${escapeHtml(formatYear(d.year))}</td>
+            <td>${escapeHtml(d.cited_by_count)}</td>
         </tr>
     `).join('');
 }
@@ -513,6 +857,63 @@ function displayNetwork(data) {
     };
     
     charts.networkChart.setOption(option);
+}
+
+function displayCitationNetwork(data) {
+    const chartDom = document.getElementById('citationNetworkChart');
+    const summary = document.getElementById('citationNetworkSummary');
+    if (charts.citationNetworkChart) charts.citationNetworkChart.dispose();
+
+    charts.citationNetworkChart = echarts.init(chartDom);
+
+    const nodes = data.nodes || [];
+    const edges = data.edges || [];
+    const maxCitations = Math.max(1, ...nodes.map(node => Number(node.value) || 0));
+    summary.textContent = `当前集合内 ${nodes.length} 篇文章，识别到 ${edges.length} 条集合内部引用关系`;
+
+    const option = {
+        tooltip: {
+            formatter: (params) => {
+                if (params.dataType === 'edge') return '引用关系';
+                const data = params.data || {};
+                return `
+                    <strong>${escapeHtml(data.title || data.name || '')}</strong><br/>
+                    ${escapeHtml(data.authors || '')}<br/>
+                    ${escapeHtml(data.journal || '')} ${escapeHtml(formatYear(data.year))}<br/>
+                    被引: ${escapeHtml(data.value || 0)}；集合内被引: ${escapeHtml(data.internal_citations || 0)}
+                `;
+            }
+        },
+        series: [{
+            name: '引文网络',
+            type: 'graph',
+            layout: 'force',
+            data: nodes.map(node => ({
+                ...node,
+                symbolSize: 10 + (Math.sqrt(Number(node.value) || 0) / Math.sqrt(maxCitations)) * 44
+            })),
+            links: edges,
+            roam: true,
+            draggable: true,
+            edgeSymbol: ['none', 'arrow'],
+            edgeSymbolSize: 8,
+            label: { show: false },
+            emphasis: {
+                focus: 'adjacency',
+                label: { show: true, formatter: '{b}', fontSize: 10 }
+            },
+            lineStyle: {
+                color: '#777',
+                width: 1,
+                opacity: 0.55,
+                curveness: 0.18
+            },
+            itemStyle: { color: '#2e7d59' },
+            force: { repulsion: 260, edgeLength: 140 }
+        }]
+    };
+
+    charts.citationNetworkChart.setOption(option);
 }
 
 function switchTab(tabName) {

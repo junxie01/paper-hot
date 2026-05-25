@@ -60,6 +60,7 @@
                 <button class="tab-btn" data-tab="authors">👥 作者分析</button>
                 <button class="tab-btn" data-tab="concepts">🏷️ 关键词</button>
                 <button class="tab-btn" data-tab="network">🕸️ 合作网络</button>
+                <button class="tab-btn" data-tab="citation">🔗 引文网络</button>
                 <button class="tab-btn" data-tab="download">⬇️ 下载论文</button>
             </div>
         </div>
@@ -112,6 +113,56 @@
                         </thead>
                         <tbody></tbody>
                     </table>
+                </div>
+                <div class="papers-workbench">
+                    <div class="papers-toolbar">
+                        <h4>📄 全部文章</h4>
+                        <div class="papers-actions">
+                            <button id="deleteSelectedBtn" class="btn btn-danger">删除选中</button>
+                        </div>
+                    </div>
+                    <div class="filters-grid">
+                        <div class="input-group">
+                            <label for="paperTextFilter">标题/作者/期刊</label>
+                            <input type="text" id="paperTextFilter" placeholder="输入筛选关键词" />
+                        </div>
+                        <div class="input-group">
+                            <label for="paperStartYearFilter">起始年份</label>
+                            <input type="number" id="paperStartYearFilter" placeholder="可选" />
+                        </div>
+                        <div class="input-group">
+                            <label for="paperEndYearFilter">结束年份</label>
+                            <input type="number" id="paperEndYearFilter" placeholder="可选" />
+                        </div>
+                        <div class="input-group">
+                            <label for="paperOaFilter">开放获取</label>
+                            <select id="paperOaFilter">
+                                <option value="all">全部</option>
+                                <option value="oa">开放获取</option>
+                                <option value="closed">非开放获取</option>
+                            </select>
+                        </div>
+                        <button id="clearPaperFiltersBtn" class="btn btn-secondary">清空筛选</button>
+                    </div>
+                    <div id="paperFilterSummary" class="paper-filter-summary"></div>
+                    <div class="table-scroll">
+                        <table id="allPapersTable" class="data-table">
+                            <thead>
+                                <tr>
+                                    <th><input type="checkbox" id="selectAllPapers" /></th>
+                                    <th>标题</th>
+                                    <th>作者</th>
+                                    <th>期刊</th>
+                                    <th>年份</th>
+                                    <th>被引</th>
+                                    <th>OA</th>
+                                    <th>操作</th>
+                                </tr>
+                            </thead>
+                            <tbody></tbody>
+                        </table>
+                    </div>
+                    <button id="openAddPaperBtn" class="add-paper-btn" title="添加文献">+</button>
                 </div>
             </div>
 
@@ -184,6 +235,14 @@
                 </div>
             </div>
 
+            <div id="citationTab" class="tab-content">
+                <div class="chart-container full-width">
+                    <h4>🔗 引文网络</h4>
+                    <div id="citationNetworkSummary" class="network-summary"></div>
+                    <div id="citationNetworkChart" class="chart" style="height: 700px;"></div>
+                </div>
+            </div>
+
             <div id="downloadTab" class="tab-content">
                 <div class="download-section">
                     <div class="download-controls">
@@ -195,6 +254,25 @@
                         <div id="papersList"></div>
                     </div>
                 </div>
+            </div>
+        </div>
+    </div>
+
+    <div id="addPaperModal" class="modal-backdrop" style="display: none;">
+        <div class="modal-card">
+            <div class="modal-header">
+                <h3>添加文献</h3>
+                <button id="closeAddPaperModalBtn" class="icon-btn" title="关闭">×</button>
+            </div>
+            <div class="modal-body">
+                <div class="add-paper-search">
+                    <input type="text" id="titleSearchInput" placeholder="输入文章题目" />
+                    <button id="searchTitleBtn" class="btn btn-primary">搜索</button>
+                    <button id="appendCsvBtn" class="btn btn-secondary">导入CSV</button>
+                    <input type="file" id="appendCsvInput" accept=".csv" style="display: none;" />
+                </div>
+                <div id="titleSearchStatus" class="modal-status"></div>
+                <div id="titleSearchResults" class="title-search-results"></div>
             </div>
         </div>
     </div>
