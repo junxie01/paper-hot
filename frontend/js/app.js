@@ -1,5 +1,18 @@
 const BASE_PATH = '/paper-hot';
 const STATE_STORAGE_KEY = 'paperHot.currentState';
+const MOTTO_STORAGE_KEY = 'paperHot.dailyMotto';
+const DAILY_MOTTOS = [
+    '放下个人素质，享受缺德人生',
+    '今天少点内耗，多点图表',
+    '文献读不完，快乐不能断',
+    '科研使人冷静，咖啡使人续命',
+    '保持怀疑，保持下班',
+    '数据会说话，我先闭嘴',
+    '先跑起来，再慢慢优雅',
+    '做人先放过自己',
+    '今天不卷，明天再说',
+    '有问题就分析，没问题就休息'
+];
 let currentFilename = null;
 let currentData = null;
 let currentPapers = [];
@@ -11,9 +24,38 @@ let currentCitationNetworkData = null;
 let charts = {};
 
 document.addEventListener('DOMContentLoaded', () => {
+    setupDailyMotto();
     setupEventListeners();
     restoreSavedSession();
 });
+
+function setupDailyMotto() {
+    const mottoElement = document.getElementById('dailyMotto');
+    if (!mottoElement) return;
+
+    const now = new Date();
+    const todayKey = [
+        now.getFullYear(),
+        String(now.getMonth() + 1).padStart(2, '0'),
+        String(now.getDate()).padStart(2, '0')
+    ].join('-');
+
+    try {
+        const saved = JSON.parse(localStorage.getItem(MOTTO_STORAGE_KEY) || '{}');
+        if (saved.date === todayKey && DAILY_MOTTOS.includes(saved.motto)) {
+            mottoElement.textContent = saved.motto;
+            return;
+        }
+
+        const motto = DAILY_MOTTOS[Math.floor(Math.random() * DAILY_MOTTOS.length)];
+        localStorage.setItem(MOTTO_STORAGE_KEY, JSON.stringify({ date: todayKey, motto }));
+        mottoElement.textContent = motto;
+    } catch (error) {
+        console.warn('每日短句初始化失败:', error);
+        const dayIndex = now.getFullYear() * 10000 + (now.getMonth() + 1) * 100 + now.getDate();
+        mottoElement.textContent = DAILY_MOTTOS[dayIndex % DAILY_MOTTOS.length];
+    }
+}
 
 function setupEventListeners() {
     document.getElementById('searchBtn').addEventListener('click', searchPapers);
