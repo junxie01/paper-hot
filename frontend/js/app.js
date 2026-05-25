@@ -22,6 +22,7 @@ function setupEventListeners() {
     document.getElementById('uploadArea').addEventListener('click', () => document.getElementById('fileInput').click());
     document.getElementById('authorCount').addEventListener('change', reloadAuthorChart);
     document.getElementById('downloadAllBtn').addEventListener('click', downloadAllPapers);
+    document.getElementById('downloadReportBtn').addEventListener('click', downloadReport);
     document.getElementById('papersList').addEventListener('click', handleDownloadListClick);
     document.getElementById('paperTextFilter').addEventListener('input', applyPaperFilters);
     document.getElementById('paperStartYearFilter').addEventListener('input', applyPaperFilters);
@@ -279,6 +280,8 @@ function renderChartsForTab(tabName = getActiveTabName()) {
         displayNetwork(currentNetworkData);
     } else if (tabName === 'citation' && currentCitationNetworkData) {
         displayCitationNetwork(currentCitationNetworkData);
+    } else if (tabName === 'report') {
+        renderReport();
     }
 }
 
@@ -425,6 +428,8 @@ async function reloadAuthorChart() {
             };
             if (getActiveTabName() === 'authors') {
                 renderAuthorChart(result.analysis.author_stats);
+            } else if (getActiveTabName() === 'report') {
+                renderReport();
             }
             renderTopCitedAuthorsTable(result.analysis.top_cited_authors);
         }
@@ -794,6 +799,202 @@ async function downloadAllPapers() {
     }
 }
 
+function formatNumber(value) {
+    const number = Number(value) || 0;
+    return number.toLocaleString();
+}
+
+function getReportTotals() {
+    const totals = currentData?.total_stats || {};
+    return {
+        papers: totals.total_papers ?? currentPapers.length ?? 0,
+        citations: totals.total_citations ?? (currentData?.yearly_stats || []).reduce((sum, row) => sum + (Number(row.citations) || 0), 0),
+        journals: totals.total_journals ?? (currentData?.journal_stats || []).length,
+        authors: totals.total_authors ?? (currentData?.author_stats || []).length
+    };
+}
+
+function getPeakRecord(rows, valueKey) {
+    return [...(rows || [])].sort((a, b) => (Number(b[valueKey]) || 0) - (Number(a[valueKey]) || 0))[0] || null;
+}
+
+function renderReportTable(rows, columns, emptyText = '暂无数据') {
+    if (!rows || rows.length === 0) {
+        return `<p class="report-empty">${escapeHtml(emptyText)}</p>`;
+    }
+
+    return `
+        <table class="report-table">
+            <thead>
+                <tr>${columns.map(column => `<th>${escapeHtml(column.label)}</th>`).join('')}</tr>
+            </thead>
+            <tbody>
+                ${rows.map(row => `
+                    <tr>
+                        ${columns.map(column => `<td>${escapeHtml(column.format ? column.format(row[column.key], row) : row[column.key])}</td>`).join('')}
+                    </tr>
+                `).join('')}
+            </tbody>
+        </table>
+    `;
+}
+
+function buildReportHtml() {
+    if (!currentData) {
+        return '<div class="report-placeholder">请先搜索或上传文献数据。</div>';
+    }
+
+    const totals = getReportTotals();
+    const yearlyStats = currentData.yearly_stats || [];
+    const topYearByCount = getPeakRecord(yearlyStats, 'count');
+    const topYearByCitations = getPeakRecord(yearlyStats, 'citations');
+    const citationNodes = currentCitationNetworkData?.nodes || [];
+    const citationEdges = currentCitationNetworkData?.edges || [];
+    const networkNodes = currentNetworkData?.nodes || [];
+    const networkEdges = currentNetworkData?.edges || [];
+    const topPapers = (currentData.citation_stats || []).slice(0, 10);
+    const topAuthors = (currentData.author_stats || []).slice(0, 10);
+    const topCitedAuthors = (currentData.top_cited_authors || []).slice(0, 10);
+    const topJournals = (currentData.journal_stats || []).slice(0, 10);
+    const topCountries = (currentData.country_stats || []).slice(0, 10);
+    const topConcepts = (currentData.concept_stats || []).slice(0, 10);
+
+    return `
+        <article class="report-document">
+            <header class="report-header">
+                <div>
+                    <h2>PaperHot 文献分析报告</h2>
+                    <p>${escapeHtml(currentFilename || '当前文献集合')}</p>
+                </div>
+                <div class="report-meta">
+                    <span>生成时间</span>
+                    <strong>${escapeHtml(new Date().toLocaleString())}</strong>
+                </div>
+            </header>
+
+            <section class="report-section">
+                <h3>总览</h3>
+                <div class="report-metrics">
+                    <div><strong>${formatNumber(totals.papers)}</strong><span>文献数</span></div>
+                    <div><strong>${formatNumber(totals.citations)}</strong><span>总被引</span></div>
+                    <div><strong>${formatNumber(totals.journals)}</strong><span>期刊数</span></div>
+                    <div><strong>${formatNumber(totals.authors)}</strong><span>作者数</span></div>
+                </div>
+                <div class="report-summary-grid">
+                    <p><strong>发表数量峰值：</strong>${topYearByCount ? `${escapeHtml(formatYear(topYearByCount.year))} 年，${formatNumber(topYearByCount.count)} 篇` : '暂无数据'}</p>
+                    <p><strong>被引峰值年份：</strong>${topYearByCitations ? `${escapeHtml(formatYear(topYearByCitations.year))} 年，${formatNumber(topYearByCitations.citations)} 次` : '暂无数据'}</p>
+                    <p><strong>合作网络：</strong>${formatNumber(networkNodes.length)} 个作者节点，${formatNumber(networkEdges.length)} 条合作关系。</p>
+                    <p><strong>引文网络：</strong>${formatNumber(citationNodes.length)} 个论文节点，${formatNumber(citationEdges.length)} 条集合内引用关系。</p>
+                </div>
+            </section>
+
+            <section class="report-section">
+                <h3>高被引论文 Top 10</h3>
+                ${renderReportTable(topPapers, [
+                    { key: 'title', label: '标题' },
+                    { key: 'authors', label: '作者' },
+                    { key: 'year', label: '年份', format: formatYear },
+                    { key: 'cited_by_count', label: '被引', format: formatNumber }
+                ])}
+            </section>
+
+            <section class="report-section two-column">
+                <div>
+                    <h3>期刊 Top 10</h3>
+                    ${renderReportTable(topJournals, [
+                        { key: 'journal', label: '期刊' },
+                        { key: 'count', label: '论文数', format: formatNumber }
+                    ])}
+                </div>
+                <div>
+                    <h3>高产作者 Top 10</h3>
+                    ${renderReportTable(topAuthors, [
+                        { key: 'author', label: '作者' },
+                        { key: 'count', label: '论文数', format: formatNumber }
+                    ])}
+                </div>
+            </section>
+
+            <section class="report-section two-column">
+                <div>
+                    <h3>高被引作者 Top 10</h3>
+                    ${renderReportTable(topCitedAuthors, [
+                        { key: 'author', label: '作者' },
+                        { key: 'paper_count', label: '论文数', format: formatNumber },
+                        { key: 'total_citations', label: '总被引', format: formatNumber }
+                    ])}
+                </div>
+                <div>
+                    <h3>国家/地区 Top 10</h3>
+                    ${renderReportTable(topCountries, [
+                        { key: 'country', label: '国家/地区' },
+                        { key: 'count', label: '论文数', format: formatNumber }
+                    ])}
+                </div>
+            </section>
+
+            <section class="report-section">
+                <h3>关键词 Top 10</h3>
+                ${renderReportTable(topConcepts, [
+                    { key: 'concept', label: '关键词' },
+                    { key: 'count', label: '论文数', format: formatNumber }
+                ])}
+            </section>
+        </article>
+    `;
+}
+
+function renderReport() {
+    const container = document.getElementById('reportContent');
+    if (!container) return;
+    container.innerHTML = buildReportHtml();
+}
+
+function downloadReport() {
+    if (!currentData) {
+        alert('请先搜索或上传文献数据');
+        return;
+    }
+
+    const reportHtml = buildReportHtml();
+    const documentHtml = `<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <title>PaperHot 文献分析报告</title>
+    <style>
+        body { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; color: #263238; margin: 32px; line-height: 1.55; }
+        h2, h3 { color: #263238; }
+        .report-header { display: flex; justify-content: space-between; gap: 24px; border-bottom: 2px solid #e5eaf0; margin-bottom: 24px; padding-bottom: 16px; }
+        .report-meta { text-align: right; color: #667085; }
+        .report-meta span { display: block; font-size: 12px; }
+        .report-section { margin: 24px 0; }
+        .report-metrics { display: grid; grid-template-columns: repeat(4, 1fr); gap: 12px; }
+        .report-metrics div { border: 1px solid #dce3ec; border-radius: 8px; padding: 14px; background: #f8fafc; }
+        .report-metrics strong { display: block; font-size: 24px; }
+        .report-metrics span { color: #667085; }
+        .report-summary-grid { display: grid; grid-template-columns: repeat(2, 1fr); gap: 10px 24px; margin-top: 16px; }
+        .two-column { display: grid; grid-template-columns: 1fr 1fr; gap: 24px; }
+        table { width: 100%; border-collapse: collapse; font-size: 13px; }
+        th, td { border-bottom: 1px solid #e5eaf0; padding: 8px; text-align: left; vertical-align: top; }
+        th { background: #f3f6fb; }
+        @media print { body { margin: 16mm; } }
+    </style>
+</head>
+<body>${reportHtml}</body>
+</html>`;
+    const blob = new Blob([documentHtml], { type: 'text/html;charset=utf-8' });
+    const url = window.URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    const date = new Date().toISOString().slice(0, 10).replace(/-/g, '');
+    a.href = url;
+    a.download = `paperhot_report_${date}.html`;
+    document.body.appendChild(a);
+    a.click();
+    window.URL.revokeObjectURL(url);
+    document.body.removeChild(a);
+}
+
 async function loadNetwork(filename) {
     try {
         const response = await fetch(`${BASE_PATH}/api/network/${encodeFilename(filename)}`);
@@ -803,6 +1004,8 @@ async function loadNetwork(filename) {
             currentNetworkData = result.network;
             if (getActiveTabName() === 'network') {
                 displayNetwork(currentNetworkData);
+            } else if (getActiveTabName() === 'report') {
+                renderReport();
             }
         }
     } catch (error) {
@@ -819,6 +1022,8 @@ async function loadCitationNetwork(filename) {
             currentCitationNetworkData = result.network;
             if (getActiveTabName() === 'citation') {
                 displayCitationNetwork(currentCitationNetworkData);
+            } else if (getActiveTabName() === 'report') {
+                renderReport();
             }
         }
     } catch (error) {

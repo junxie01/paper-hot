@@ -431,6 +431,131 @@ body {
     padding: 40px;
 }
 
+.report-actions {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    gap: 16px;
+    margin-bottom: 18px;
+}
+
+.report-actions h4 {
+    margin: 0;
+    color: #333;
+}
+
+.report-content {
+    background: #ffffff;
+    border: 1px solid #e2e8f0;
+    border-radius: 12px;
+    padding: 24px;
+}
+
+.report-header {
+    display: flex;
+    justify-content: space-between;
+    gap: 20px;
+    padding-bottom: 18px;
+    border-bottom: 1px solid #e2e8f0;
+    margin-bottom: 22px;
+}
+
+.report-header h2 {
+    margin: 0 0 6px;
+    color: #263238;
+}
+
+.report-header p,
+.report-meta {
+    color: #667085;
+}
+
+.report-meta {
+    text-align: right;
+    min-width: 180px;
+}
+
+.report-meta span {
+    display: block;
+    font-size: 0.82rem;
+}
+
+.report-section {
+    margin: 24px 0;
+}
+
+.report-section h3 {
+    margin: 0 0 12px;
+    color: #263238;
+}
+
+.report-metrics {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(140px, 1fr));
+    gap: 12px;
+}
+
+.report-metrics div {
+    border: 1px solid #dce3ec;
+    border-radius: 8px;
+    background: #f8fafc;
+    padding: 14px;
+}
+
+.report-metrics strong {
+    display: block;
+    color: #2f5fda;
+    font-size: 1.5rem;
+}
+
+.report-metrics span,
+.report-empty {
+    color: #667085;
+}
+
+.report-summary-grid {
+    margin-top: 16px;
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(260px, 1fr));
+    gap: 10px 24px;
+}
+
+.report-summary-grid p {
+    margin: 0;
+    color: #3f4d5a;
+}
+
+.report-section.two-column {
+    display: grid;
+    grid-template-columns: minmax(260px, 1fr) minmax(260px, 1fr);
+    gap: 24px;
+}
+
+.report-table {
+    width: 100%;
+    border-collapse: collapse;
+    font-size: 0.9rem;
+}
+
+.report-table th,
+.report-table td {
+    border-bottom: 1px solid #e5eaf0;
+    padding: 8px;
+    text-align: left;
+    vertical-align: top;
+}
+
+.report-table th {
+    background: #f3f6fb;
+    color: #344054;
+}
+
+.report-placeholder {
+    color: #667085;
+    text-align: center;
+    padding: 60px 20px;
+}
+
 .download-section p {
     margin-bottom: 20px;
     color: #555;
@@ -815,12 +940,26 @@ body {
         grid-template-columns: 1fr 1fr;
     }
 
+    .report-section.two-column {
+        grid-template-columns: 1fr;
+    }
+
     .add-paper-search {
         grid-template-columns: 1fr;
     }
 }
 
 @media (max-width: 620px) {
+    .report-actions,
+    .report-header {
+        align-items: flex-start;
+        flex-direction: column;
+    }
+
+    .report-meta {
+        text-align: left;
+    }
+
     .papers-toolbar {
         align-items: flex-start;
         flex-direction: column;
