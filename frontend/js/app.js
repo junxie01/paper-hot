@@ -1168,13 +1168,57 @@ function displayNetwork(data) {
     chart.setOption(option);
 }
 
+function buildCitationGraphData(nodes, edges) {
+    const usedNames = new Map();
+    const nameByKey = new Map();
+
+    const graphNodes = nodes.map((node, index) => {
+        const title = node.title || node.name || `无标题 ${index + 1}`;
+        const shortTitle = title.length > 42 ? `${title.slice(0, 42)}...` : title;
+        const year = formatYear(node.year);
+        const baseName = year ? `${shortTitle} (${year})` : shortTitle;
+        const useCount = usedNames.get(baseName) || 0;
+        usedNames.set(baseName, useCount + 1);
+        const graphName = useCount ? `${baseName} #${useCount + 1}` : baseName;
+
+        if (node.id !== undefined && node.id !== null) {
+            nameByKey.set(String(node.id), graphName);
+        }
+        if (node.name) {
+            nameByKey.set(String(node.name), graphName);
+        }
+        if (node.title) {
+            nameByKey.set(String(node.title), graphName);
+        }
+        nameByKey.set(graphName, graphName);
+
+        return {
+            ...node,
+            id: graphName,
+            name: graphName,
+            category: 0,
+            symbolSize: Math.max(14, Math.sqrt(Number(node.value) || 1) * 5)
+        };
+    });
+    const graphNodeNames = new Set(graphNodes.map(node => node.name));
+
+    const graphEdges = edges
+        .map(edge => ({
+            ...edge,
+            source: nameByKey.get(String(edge.source)) || edge.source,
+            target: nameByKey.get(String(edge.target)) || edge.target
+        }))
+        .filter(edge => graphNodeNames.has(edge.source) && graphNodeNames.has(edge.target));
+
+    return { nodes: graphNodes, edges: graphEdges };
+}
+
 function displayCitationNetwork(data) {
     const summary = document.getElementById('citationNetworkSummary');
     const chartDom = document.getElementById('citationNetworkChart');
     const nodes = data.nodes || [];
     const edges = data.edges || [];
     const hasEdges = edges.length > 0;
-    const maxCitations = Math.max(1, ...nodes.map(node => Number(node.value) || 0));
     summary.textContent = hasEdges
         ? `当前集合内 ${nodes.length} 篇文章，识别到 ${edges.length} 条集合内部引用关系`
         : `当前集合内 ${nodes.length} 篇文章，暂未识别到集合内部引用关系；下图仍按总被引数显示每篇文章`;
@@ -1194,10 +1238,12 @@ function displayCitationNetwork(data) {
         return;
     }
 
+    const graphData = buildCitationGraphData(nodes, edges);
+
     if (typeof echarts === 'undefined') {
-        renderSvgNetwork('citationNetworkChart', nodes, edges, {
+        renderSvgNetwork('citationNetworkChart', graphData.nodes, graphData.edges, {
             directed: true,
-            labelKey: 'title',
+            labelKey: 'name',
             nodeColor: '#2e7d59',
             valueLabel: '被引'
         });
@@ -1206,9 +1252,9 @@ function displayCitationNetwork(data) {
 
     const chart = initChart('citationNetworkChart', 'citationNetworkChart');
     if (!chart) {
-        renderSvgNetwork('citationNetworkChart', nodes, edges, {
+        renderSvgNetwork('citationNetworkChart', graphData.nodes, graphData.edges, {
             directed: true,
-            labelKey: 'title',
+            labelKey: 'name',
             nodeColor: '#2e7d59',
             valueLabel: '被引'
         });
@@ -1230,20 +1276,11 @@ function displayCitationNetwork(data) {
         },
         legend: { data: ['论文'] },
         series: [{
-            name: '论文',
+            name: '论文引用',
             type: 'graph',
             layout: 'force',
-            data: nodes.map(node => {
-                const title = node.title || node.name || '无标题';
-                return {
-                    ...node,
-                    id: node.id,
-                    name: title.length > 34 ? `${title.slice(0, 34)}...` : title,
-                    category: 0,
-                    symbolSize: 16 + (Math.sqrt(Number(node.value) || 0) / Math.sqrt(maxCitations)) * 46
-                };
-            }),
-            links: edges,
+            data: graphData.nodes,
+            links: graphData.edges,
             categories: [{ name: '论文' }],
             roam: true,
             draggable: true,
@@ -1256,16 +1293,13 @@ function displayCitationNetwork(data) {
                 fontSize: 10
             },
             lineStyle: {
-                color: '#7b8794',
-                opacity: 0.65,
-                curveness: 0.2
+                color: 'source',
+                curveness: 0.3
             },
             force: {
-                repulsion: 280,
-                edgeLength: 150,
-                gravity: 0.12
-            },
-            itemStyle: { color: '#2e7d59' }
+                repulsion: 200,
+                edgeLength: 100
+            }
         }]
     };
 
