@@ -106,9 +106,15 @@ paper_hot/
 
 ## 部署到服务器
 
-如果你想部署到自己的服务器（如 seis-jun.xyz），可以使用 Nginx 反向代理。
+如果你想部署到自己的服务器（如 `paper-hot.seis-jun.xyz`），可以使用 Nginx 反向代理和 systemd 常驻运行。
 
-参考配置见 `nginx.conf` 文件。
+阿里云轻量应用服务器部署步骤见：
+
+```text
+deploy/DEPLOY_ALIYUN_SYSTEMD.md
+```
+
+systemd 服务模板见 `deploy/paper-hot.service`，Nginx 配置模板见 `deploy/nginx-paper-hot.conf`。
 
 ## 数据来源
 

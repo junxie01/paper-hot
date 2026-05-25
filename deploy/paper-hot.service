@@ -1,0 +1,17 @@
+[Unit]
+Description=PaperHot FastAPI service
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=paperhot
+Group=paperhot
+WorkingDirectory=/opt/paper-hot
+Environment=PYTHONUNBUFFERED=1
+ExecStart=/opt/paper-hot/venv/bin/uvicorn backend.main:app --host 127.0.0.1 --port 8000 --proxy-headers
+Restart=always
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target
