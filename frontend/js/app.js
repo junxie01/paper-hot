@@ -104,6 +104,37 @@ function formatYear(value) {
     return String(value).replace(/\.0$/, '');
 }
 
+function abbreviatePaperTitle(title, fallbackIndex) {
+    const rawTitle = String(title || '').trim();
+    if (!rawTitle) return `P${fallbackIndex + 1}`;
+
+    const cjkChars = rawTitle.match(/[\u4e00-\u9fff]/g);
+    if (cjkChars && cjkChars.length >= 3) {
+        return cjkChars.slice(0, 4).join('');
+    }
+
+    const stopWords = new Set([
+        'a', 'an', 'and', 'are', 'as', 'at', 'based', 'beneath', 'between',
+        'by', 'during', 'for', 'from', 'in', 'into', 'near', 'of', 'on',
+        'the', 'to', 'using', 'via', 'with'
+    ]);
+    const words = rawTitle
+        .replace(/[^A-Za-z0-9\s-]/g, ' ')
+        .split(/\s+/)
+        .map(word => word.replace(/^-+|-+$/g, ''))
+        .filter(Boolean);
+    const meaningfulWords = words
+        .filter(word => !stopWords.has(word.toLowerCase()))
+        .slice(0, 5);
+    const sourceWords = meaningfulWords.length >= 2 ? meaningfulWords : words.slice(0, 4);
+    const acronym = sourceWords
+        .map(word => word.charAt(0).toUpperCase())
+        .join('')
+        .slice(0, 6);
+
+    return acronym || `P${fallbackIndex + 1}`;
+}
+
 function getSavedState() {
     try {
         return JSON.parse(localStorage.getItem(STATE_STORAGE_KEY) || '{}');
@@ -1015,6 +1046,8 @@ function renderSvgNetwork(chartId, nodes, edges, options = {}) {
     const maxNodes = options.maxNodes || 80;
     const labelKey = options.labelKey || 'name';
     const nodeColor = options.nodeColor || '#2e7d59';
+    const minRadius = options.minRadius ?? 10;
+    const maxRadius = options.maxRadius ?? 40;
     const visibleNodes = [...nodes]
         .sort((a, b) => (Number(b.value) || 0) - (Number(a.value) || 0))
         .slice(0, maxNodes);
@@ -1055,7 +1088,7 @@ function renderSvgNetwork(chartId, nodes, edges, options = {}) {
         const x = centerX + radius * Math.cos(angle);
         const y = centerY + radius * Math.sin(angle);
         const value = Number(node.value) || 0;
-        const nodeRadius = 10 + (Math.sqrt(value) / Math.sqrt(maxValue)) * 30;
+        const nodeRadius = minRadius + (Math.sqrt(value) / Math.sqrt(maxValue)) * (maxRadius - minRadius);
         positions.set(String(node.id), { x, y, radius: nodeRadius });
     });
 
@@ -1097,7 +1130,7 @@ function renderSvgNetwork(chartId, nodes, edges, options = {}) {
 
         const label = node[labelKey] || node.title || node.name || '无标题';
         const title = document.createElementNS(svgNs, 'title');
-        title.textContent = `${label}\n${options.valueLabel || '数量'}: ${node.value || 0}`;
+        title.textContent = node.tooltip || `${label}\n${options.valueLabel || '数量'}: ${node.value || 0}`;
         group.appendChild(title);
 
         const circle = document.createElementNS(svgNs, 'circle');
@@ -1109,10 +1142,18 @@ function renderSvgNetwork(chartId, nodes, edges, options = {}) {
         group.appendChild(circle);
 
         const text = document.createElementNS(svgNs, 'text');
-        text.setAttribute('x', position.x + position.radius + 6);
-        text.setAttribute('y', position.y + 4);
-        text.setAttribute('class', 'svg-network-label');
-        text.textContent = label.length > 30 ? `${label.slice(0, 30)}...` : label;
+        if (options.labelInside) {
+            text.setAttribute('x', position.x);
+            text.setAttribute('y', position.y + 3);
+            text.setAttribute('text-anchor', 'middle');
+            text.setAttribute('class', 'svg-network-label inside');
+            text.textContent = node.shortLabel || (label.length > 8 ? `${label.slice(0, 8)}...` : label);
+        } else {
+            text.setAttribute('x', position.x + position.radius + 6);
+            text.setAttribute('y', position.y + 4);
+            text.setAttribute('class', 'svg-network-label');
+            text.textContent = label.length > 30 ? `${label.slice(0, 30)}...` : label;
+        }
         group.appendChild(text);
 
         nodeGroup.appendChild(group);
@@ -1170,7 +1211,9 @@ function displayNetwork(data) {
 
 function buildCitationGraphData(nodes, edges) {
     const usedNames = new Map();
+    const usedLabels = new Map();
     const nameByKey = new Map();
+    const maxCitations = Math.max(1, ...nodes.map(node => Number(node.value) || 0));
 
     const graphNodes = nodes.map((node, index) => {
         const title = node.title || node.name || `无标题 ${index + 1}`;
@@ -1180,6 +1223,12 @@ function buildCitationGraphData(nodes, edges) {
         const useCount = usedNames.get(baseName) || 0;
         usedNames.set(baseName, useCount + 1);
         const graphName = useCount ? `${baseName} #${useCount + 1}` : baseName;
+        const baseShortLabel = abbreviatePaperTitle(title, index);
+        const labelUseCount = usedLabels.get(baseShortLabel) || 0;
+        usedLabels.set(baseShortLabel, labelUseCount + 1);
+        const shortLabel = labelUseCount ? `${baseShortLabel}${labelUseCount + 1}` : baseShortLabel;
+        const citationCount = Number(node.value) || 0;
+        const symbolSize = 12 + (Math.sqrt(citationCount) / Math.sqrt(maxCitations)) * 18;
 
         if (node.id !== undefined && node.id !== null) {
             nameByKey.set(String(node.id), graphName);
@@ -1196,8 +1245,17 @@ function buildCitationGraphData(nodes, edges) {
             ...node,
             id: graphName,
             name: graphName,
+            shortLabel,
+            fullLabel: title,
+            tooltip: [
+                title,
+                node.authors || '',
+                `${node.journal || ''} ${year}`.trim(),
+                `总被引: ${citationCount}`,
+                `集合内被引: ${node.internal_citations || 0}`
+            ].filter(Boolean).join('\n'),
             category: 0,
-            symbolSize: Math.max(14, Math.sqrt(Number(node.value) || 1) * 5)
+            symbolSize
         };
     });
     const graphNodeNames = new Set(graphNodes.map(node => node.name));
@@ -1244,6 +1302,9 @@ function displayCitationNetwork(data) {
         renderSvgNetwork('citationNetworkChart', graphData.nodes, graphData.edges, {
             directed: true,
             labelKey: 'name',
+            labelInside: true,
+            minRadius: 8,
+            maxRadius: 22,
             nodeColor: '#2e7d59',
             valueLabel: '被引'
         });
@@ -1255,6 +1316,9 @@ function displayCitationNetwork(data) {
         renderSvgNetwork('citationNetworkChart', graphData.nodes, graphData.edges, {
             directed: true,
             labelKey: 'name',
+            labelInside: true,
+            minRadius: 8,
+            maxRadius: 22,
             nodeColor: '#2e7d59',
             valueLabel: '被引'
         });
@@ -1263,11 +1327,14 @@ function displayCitationNetwork(data) {
 
     const option = {
         tooltip: {
+            confine: true,
+            extraCssText: 'max-width: 360px; white-space: normal; line-height: 1.45;',
             formatter: (params) => {
                 if (params.dataType === 'edge') return '引用关系';
                 const item = params.data || {};
                 return `
-                    <strong>${escapeHtml(item.title || item.name || '')}</strong><br/>
+                    <strong>${escapeHtml(item.fullLabel || item.title || item.name || '')}</strong><br/>
+                    缩写: ${escapeHtml(item.shortLabel || '')}<br/>
                     ${escapeHtml(item.authors || '')}<br/>
                     ${escapeHtml(item.journal || '')} ${escapeHtml(formatYear(item.year))}<br/>
                     被引: ${escapeHtml(item.value || 0)}；集合内被引: ${escapeHtml(item.internal_citations || 0)}
@@ -1288,9 +1355,28 @@ function displayCitationNetwork(data) {
             edgeSymbolSize: 8,
             label: {
                 show: true,
-                position: 'right',
-                formatter: '{b}',
-                fontSize: 10
+                position: 'inside',
+                formatter: (params) => params.data.shortLabel || '',
+                fontSize: 8,
+                fontWeight: 700,
+                color: '#ffffff'
+            },
+            emphasis: {
+                focus: 'adjacency',
+                label: {
+                    show: true,
+                    position: 'right',
+                    formatter: (params) => params.data.fullLabel || params.data.name,
+                    fontSize: 11,
+                    color: '#263238',
+                    backgroundColor: 'rgba(255, 255, 255, 0.92)',
+                    borderColor: '#d7dee8',
+                    borderWidth: 1,
+                    borderRadius: 4,
+                    padding: [3, 5],
+                    width: 260,
+                    overflow: 'truncate'
+                }
             },
             lineStyle: {
                 color: 'source',

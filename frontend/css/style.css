@@ -313,6 +313,14 @@ body {
     stroke-linejoin: round;
 }
 
+.svg-network-label.inside {
+    fill: #ffffff;
+    font-size: 9px;
+    font-weight: 700;
+    paint-order: normal;
+    stroke: none;
+}
+
 .svg-network-note {
     color: #777;
     font-size: 0.9rem;
