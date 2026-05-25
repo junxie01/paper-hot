@@ -22,6 +22,7 @@ function setupEventListeners() {
     document.getElementById('uploadArea').addEventListener('click', () => document.getElementById('fileInput').click());
     document.getElementById('authorCount').addEventListener('change', reloadAuthorChart);
     document.getElementById('downloadAllBtn').addEventListener('click', downloadAllPapers);
+    document.getElementById('downloadCsvBtn').addEventListener('click', downloadCurrentCsv);
     document.getElementById('downloadReportBtn').addEventListener('click', downloadReport);
     document.getElementById('papersList').addEventListener('click', handleDownloadListClick);
     document.getElementById('paperTextFilter').addEventListener('input', applyPaperFilters);
@@ -797,6 +798,20 @@ async function downloadAllPapers() {
     } catch (error) {
         statusEl.innerHTML = `<p>❌ 下载失败: ${error.message}</p>`;
     }
+}
+
+function downloadCurrentCsv() {
+    if (!currentFilename) {
+        alert('请先搜索或上传文献数据');
+        return;
+    }
+
+    const a = document.createElement('a');
+    a.href = `${BASE_PATH}/api/download-csv/${encodeFilename(currentFilename)}`;
+    a.download = currentFilename;
+    document.body.appendChild(a);
+    a.click();
+    document.body.removeChild(a);
 }
 
 function formatNumber(value) {

@@ -912,6 +912,23 @@ async def download_papers(filename: str):
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
+@app.get(base_prefix + "/api/download-csv/{filename}")
+async def download_csv(filename: str):
+    try:
+        csv_path = get_csv_path(filename)
+        if not csv_path.exists():
+            raise HTTPException(status_code=404, detail="File not found")
+
+        return FileResponse(
+            path=csv_path,
+            filename=csv_path.name,
+            media_type="text/csv"
+        )
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
 @app.get(f"{base_prefix}/api/files")
 async def list_files():
     try:
