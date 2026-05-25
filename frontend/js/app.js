@@ -988,9 +988,163 @@ function renderConceptChart(data) {
     chart.setOption(option);
 }
 
+function disposeChart(chartKey) {
+    if (!charts[chartKey]) return;
+    try {
+        charts[chartKey].dispose();
+    } catch (error) {
+        console.warn(`释放图表 ${chartKey} 失败:`, error);
+    }
+    delete charts[chartKey];
+}
+
+function renderSvgNetwork(chartId, nodes, edges, options = {}) {
+    const container = document.getElementById(chartId);
+    if (!container) return;
+
+    disposeChart(chartId);
+    container.replaceChildren();
+
+    if (!nodes.length) {
+        container.innerHTML = '<div class="chart-placeholder">当前没有可显示的节点</div>';
+        return;
+    }
+
+    const width = 1100;
+    const height = 540;
+    const maxNodes = options.maxNodes || 80;
+    const labelKey = options.labelKey || 'name';
+    const nodeColor = options.nodeColor || '#2e7d59';
+    const visibleNodes = [...nodes]
+        .sort((a, b) => (Number(b.value) || 0) - (Number(a.value) || 0))
+        .slice(0, maxNodes);
+    const visibleIds = new Set(visibleNodes.map(node => String(node.id)));
+    const visibleEdges = edges.filter(edge => visibleIds.has(String(edge.source)) && visibleIds.has(String(edge.target)));
+    const maxValue = Math.max(1, ...visibleNodes.map(node => Number(node.value) || 0));
+    const svgNs = 'http://www.w3.org/2000/svg';
+    const svg = document.createElementNS(svgNs, 'svg');
+    svg.setAttribute('viewBox', `0 0 ${width} ${height}`);
+    svg.setAttribute('class', 'svg-network');
+    svg.setAttribute('role', 'img');
+
+    const defs = document.createElementNS(svgNs, 'defs');
+    const marker = document.createElementNS(svgNs, 'marker');
+    marker.setAttribute('id', `${chartId}Arrow`);
+    marker.setAttribute('markerWidth', '10');
+    marker.setAttribute('markerHeight', '10');
+    marker.setAttribute('refX', '8');
+    marker.setAttribute('refY', '3');
+    marker.setAttribute('orient', 'auto');
+    marker.setAttribute('markerUnits', 'strokeWidth');
+    const arrowPath = document.createElementNS(svgNs, 'path');
+    arrowPath.setAttribute('d', 'M0,0 L0,6 L9,3 z');
+    arrowPath.setAttribute('fill', '#7b8794');
+    marker.appendChild(arrowPath);
+    defs.appendChild(marker);
+    svg.appendChild(defs);
+
+    const centerX = width / 2;
+    const centerY = height / 2;
+    const baseRadius = Math.min(width, height) * 0.35;
+    const positions = new Map();
+
+    visibleNodes.forEach((node, index) => {
+        const angle = (Math.PI * 2 * index / visibleNodes.length) - Math.PI / 2;
+        const ringOffset = visibleNodes.length > 18 ? ((index % 3) - 1) * 34 : 0;
+        const radius = baseRadius + ringOffset;
+        const x = centerX + radius * Math.cos(angle);
+        const y = centerY + radius * Math.sin(angle);
+        const value = Number(node.value) || 0;
+        const nodeRadius = 10 + (Math.sqrt(value) / Math.sqrt(maxValue)) * 30;
+        positions.set(String(node.id), { x, y, radius: nodeRadius });
+    });
+
+    const edgeGroup = document.createElementNS(svgNs, 'g');
+    edgeGroup.setAttribute('class', 'svg-network-edges');
+    visibleEdges.forEach(edge => {
+        const source = positions.get(String(edge.source));
+        const target = positions.get(String(edge.target));
+        if (!source || !target) return;
+
+        const dx = target.x - source.x;
+        const dy = target.y - source.y;
+        const distance = Math.max(Math.sqrt(dx * dx + dy * dy), 1);
+        const startX = source.x + (dx / distance) * source.radius;
+        const startY = source.y + (dy / distance) * source.radius;
+        const endX = target.x - (dx / distance) * (target.radius + 4);
+        const endY = target.y - (dy / distance) * (target.radius + 4);
+
+        const line = document.createElementNS(svgNs, 'line');
+        line.setAttribute('x1', startX);
+        line.setAttribute('y1', startY);
+        line.setAttribute('x2', endX);
+        line.setAttribute('y2', endY);
+        line.setAttribute('class', options.directed ? 'svg-network-edge directed' : 'svg-network-edge');
+        if (options.directed) {
+            line.setAttribute('marker-end', `url(#${chartId}Arrow)`);
+        }
+        edgeGroup.appendChild(line);
+    });
+    svg.appendChild(edgeGroup);
+
+    const nodeGroup = document.createElementNS(svgNs, 'g');
+    visibleNodes.forEach(node => {
+        const position = positions.get(String(node.id));
+        if (!position) return;
+
+        const group = document.createElementNS(svgNs, 'g');
+        group.setAttribute('class', 'svg-network-node');
+
+        const label = node[labelKey] || node.title || node.name || '无标题';
+        const title = document.createElementNS(svgNs, 'title');
+        title.textContent = `${label}\n${options.valueLabel || '数量'}: ${node.value || 0}`;
+        group.appendChild(title);
+
+        const circle = document.createElementNS(svgNs, 'circle');
+        circle.setAttribute('cx', position.x);
+        circle.setAttribute('cy', position.y);
+        circle.setAttribute('r', position.radius);
+        circle.setAttribute('fill', nodeColor);
+        circle.setAttribute('class', 'svg-network-circle');
+        group.appendChild(circle);
+
+        const text = document.createElementNS(svgNs, 'text');
+        text.setAttribute('x', position.x + position.radius + 6);
+        text.setAttribute('y', position.y + 4);
+        text.setAttribute('class', 'svg-network-label');
+        text.textContent = label.length > 30 ? `${label.slice(0, 30)}...` : label;
+        group.appendChild(text);
+
+        nodeGroup.appendChild(group);
+    });
+    svg.appendChild(nodeGroup);
+
+    container.appendChild(svg);
+    if (nodes.length > visibleNodes.length) {
+        const note = document.createElement('div');
+        note.className = 'svg-network-note';
+        note.textContent = `图表库未加载，已用备用图显示最高 ${visibleNodes.length} 个节点。`;
+        container.appendChild(note);
+    }
+}
+
 function displayNetwork(data) {
+    if (typeof echarts === 'undefined') {
+        renderSvgNetwork('networkChart', data.nodes || [], data.edges || [], {
+            nodeColor: '#667eea',
+            valueLabel: '合作次数'
+        });
+        return;
+    }
+
     const chart = initChart('networkChart', 'networkChart');
-    if (!chart) return;
+    if (!chart) {
+        renderSvgNetwork('networkChart', data.nodes || [], data.edges || [], {
+            nodeColor: '#667eea',
+            valueLabel: '合作次数'
+        });
+        return;
+    }
     
     const categories = [{ name: '作者' }];
     
@@ -1040,8 +1194,26 @@ function displayCitationNetwork(data) {
         return;
     }
 
+    if (typeof echarts === 'undefined') {
+        renderSvgNetwork('citationNetworkChart', nodes, edges, {
+            directed: true,
+            labelKey: 'title',
+            nodeColor: '#2e7d59',
+            valueLabel: '被引'
+        });
+        return;
+    }
+
     const chart = initChart('citationNetworkChart', 'citationNetworkChart');
-    if (!chart) return;
+    if (!chart) {
+        renderSvgNetwork('citationNetworkChart', nodes, edges, {
+            directed: true,
+            labelKey: 'title',
+            nodeColor: '#2e7d59',
+            valueLabel: '被引'
+        });
+        return;
+    }
 
     const option = {
         tooltip: {
