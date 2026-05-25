@@ -17,6 +17,8 @@ import uuid
 import shutil
 from datetime import datetime
 import io
+import re
+import unicodedata
 
 
 class CustomJSONEncoder(json.JSONEncoder):
@@ -106,6 +108,41 @@ def normalize_open_access(value: Any) -> bool:
         return value
     text = str(value).strip().lower()
     return text in {"true", "1", "yes", "y", "open", "oa"}
+
+def clean_text(value: Any) -> str:
+    if pd.isna(value):
+        return ""
+    text = unicodedata.normalize("NFKC", str(value)).strip()
+    text = re.sub(r"\s+", " ", text)
+    if text.lower() == "nan":
+        return ""
+    return text
+
+def canonical_text(value: Any) -> str:
+    return clean_text(value).casefold()
+
+def split_values(value: Any) -> List[str]:
+    return [clean_text(part) for part in str(value).split(";") if clean_text(part)]
+
+def top_label_counts(values: List[str], label_key: str, top_n: int) -> List[Dict[str, Any]]:
+    grouped: Dict[str, Dict[str, Any]] = {}
+    for value in values:
+        label = clean_text(value)
+        key = canonical_text(label)
+        if not key:
+            continue
+        if key not in grouped:
+            grouped[key] = {"count": 0, "labels": {}}
+        grouped[key]["count"] += 1
+        grouped[key]["labels"][label] = grouped[key]["labels"].get(label, 0) + 1
+
+    records = []
+    for item in grouped.values():
+        display_label = max(item["labels"].items(), key=lambda pair: (pair[1], len(pair[0])))[0]
+        records.append({label_key: display_label, "count": item["count"]})
+
+    records.sort(key=lambda row: (-row["count"], row[label_key].casefold()))
+    return records[:top_n]
 
 def normalize_papers_df(df: pd.DataFrame) -> pd.DataFrame:
     df = df.copy()
@@ -218,20 +255,21 @@ def parse_references(value: Any) -> List[str]:
     return [part.strip() for part in text.split(";") if part.strip()]
 
 def get_total_stats(df: pd.DataFrame) -> Dict[str, int]:
-    journals = df["journal"].dropna().astype(str).str.strip()
-    journals = journals[(journals != "") & (journals.str.lower() != "nan")]
+    journals = {
+        canonical_text(journal)
+        for journal in df["journal"].dropna()
+        if canonical_text(journal)
+    }
 
     authors = set()
     for authors_text in df["authors"].dropna():
-        for author in str(authors_text).split(";"):
-            clean_author = author.strip()
-            if clean_author and clean_author.lower() != "nan":
-                authors.add(clean_author)
+        for author in split_values(authors_text):
+            authors.add(canonical_text(author))
 
     return {
         "total_papers": int(len(df)),
         "total_citations": int(pd.to_numeric(df["cited_by_count"], errors="coerce").fillna(0).sum()),
-        "total_journals": int(journals.nunique()),
+        "total_journals": int(len(journals)),
         "total_authors": int(len(authors)),
     }
 
@@ -264,7 +302,11 @@ async def search_papers(request: SearchRequest):
             safe_keyword = f"search_{uuid.uuid4().hex[:8]}"
         filename = f"{safe_keyword}_papers.csv"
         csv_path = get_csv_path(filename)
-        write_papers_csv(filename, df, create_backup=csv_path.exists())
+        if csv_path.exists():
+            timestamp = datetime.now().strftime("%Y%m%d%H%M%S")
+            filename = f"{safe_keyword}_papers_{timestamp}.csv"
+            csv_path = get_csv_path(filename)
+        write_papers_csv(filename, df, create_backup=False)
         
         result = {
             "success": True,
@@ -488,32 +530,26 @@ def get_yearly_stats(df):
     return records
 
 def get_journal_stats(df):
-    journals = df["journal"].dropna()
-    journals = journals[journals != ""]
-    journal_counts = journals.value_counts().head(20)
-    result = [{"journal": name, "count": count} for name, count in journal_counts.items()]
-    return result
+    journals = [clean_text(journal) for journal in df["journal"].dropna()]
+    return top_label_counts(journals, "journal", 20)
 
 def get_country_stats(df):
     all_countries = []
     for countries in df["countries"].dropna():
-        all_countries.extend([c.strip() for c in str(countries).split(";") if c.strip()])
-    country_series = pd.Series(all_countries).value_counts().head(20)
-    return [{"country": k, "count": v} for k, v in country_series.items()]
+        all_countries.extend(split_values(countries))
+    return top_label_counts(all_countries, "country", 20)
 
 def get_author_stats(df, top_n=50):
     all_authors = []
     for authors in df["authors"].dropna():
-        all_authors.extend([a.strip() for a in str(authors).split(";") if a.strip()])
-    author_series = pd.Series(all_authors).value_counts().head(top_n)
-    return [{"author": k, "count": v} for k, v in author_series.items()]
+        all_authors.extend(split_values(authors))
+    return top_label_counts(all_authors, "author", top_n)
 
 def get_concept_stats(df):
     all_concepts = []
     for concepts in df["concepts"].dropna():
-        all_concepts.extend([c.strip() for c in str(concepts).split(";") if c.strip()])
-    concept_series = pd.Series(all_concepts).value_counts().head(30)
-    return [{"concept": k, "count": v} for k, v in concept_series.items()]
+        all_concepts.extend(split_values(concepts))
+    return top_label_counts(all_concepts, "concept", 30)
 
 def get_citation_stats(df):
     top_cited = df.nlargest(20, "cited_by_count")[["title", "authors", "year", "cited_by_count"]].copy()
@@ -536,21 +572,14 @@ def get_citation_stats(df):
 
 def get_top_cited_authors(df):
     author_data = []
-    
-    # 去重：优先按 DOI 去重，没有 DOI 的按 title 去重
-    # 先处理有 DOI 的
-    has_doi = df[df['doi'].notna()].drop_duplicates(subset=['doi'], keep='first')
-    # 再处理没有 DOI 的，按 title 去重
-    no_doi = df[df['doi'].isna()].drop_duplicates(subset=['title'], keep='first')
-    # 合并
-    df = pd.concat([has_doi, no_doi], ignore_index=True)
+    df, _ = dedupe_papers(df)
     
     for idx, row in df.iterrows():
         authors_str = str(row.get("authors", ""))
         if not authors_str or authors_str == "nan":
             continue
             
-        authors = [a.strip() for a in authors_str.split(";") if a.strip()]
+        authors = split_values(authors_str)
         if not authors:
             continue
             
@@ -566,6 +595,7 @@ def get_top_cited_authors(df):
         
         author_data.append({
             "author": first_author,
+            "author_key": canonical_text(first_author),
             "cited_by": cited_by
         })
     
@@ -575,13 +605,14 @@ def get_top_cited_authors(df):
     df_authors = pd.DataFrame(author_data)
     
     # 按作者分组聚合
-    author_stats = df_authors.groupby("author").agg({
-        "author": "count",
+    author_stats = df_authors.groupby("author_key").agg({
+        "author": lambda values: max(values.value_counts().items(), key=lambda pair: (pair[1], len(pair[0])))[0],
+        "author_key": "count",
         "cited_by": ["sum", "max"]
     }).reset_index()
     
     # 重新命名列
-    author_stats.columns = ["author", "paper_count", "total_citations", "max_citations"]
+    author_stats.columns = ["author_key", "author", "paper_count", "total_citations", "max_citations"]
     author_stats["avg_citations"] = author_stats["total_citations"] / author_stats["paper_count"]
     
     # 按总被引排序，取前20

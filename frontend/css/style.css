@@ -271,6 +271,15 @@ body {
     height: 400px;
 }
 
+.chart-placeholder {
+    min-height: 220px;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    color: #666;
+    text-align: center;
+}
+
 .table-container {
     background: #f8f9fa;
     border-radius: 15px;

@@ -5,6 +5,8 @@ let currentPapers = [];
 let filteredPapers = [];
 let selectedPaperIndices = new Set();
 let titleSearchResults = [];
+let currentNetworkData = null;
+let currentCitationNetworkData = null;
 let charts = {};
 
 document.addEventListener('DOMContentLoaded', () => {
@@ -113,6 +115,65 @@ function closeAddPaperModal() {
     document.getElementById('addPaperModal').style.display = 'none';
 }
 
+function getActiveTabName() {
+    return document.querySelector('.tab-btn.active')?.dataset.tab || 'overview';
+}
+
+function initChart(chartId, chartKey) {
+    const chartDom = document.getElementById(chartId);
+    if (!chartDom) return null;
+
+    if (typeof echarts === 'undefined') {
+        chartDom.innerHTML = '<div class="chart-placeholder">图表库未加载，请检查网络后刷新页面</div>';
+        return null;
+    }
+
+    if (chartDom.offsetWidth === 0 || chartDom.offsetHeight === 0) {
+        return null;
+    }
+
+    if (charts[chartKey]) {
+        try {
+            charts[chartKey].dispose();
+        } catch (error) {
+            console.warn(`释放图表 ${chartKey} 失败:`, error);
+        }
+        delete charts[chartKey];
+    }
+    chartDom.replaceChildren();
+    charts[chartKey] = echarts.init(chartDom);
+    return charts[chartKey];
+}
+
+function setChartHeight(chartId, itemCount, minHeight = 420, rowHeight = 26) {
+    const chartDom = document.getElementById(chartId);
+    if (!chartDom) return;
+    chartDom.style.height = `${Math.max(minHeight, itemCount * rowHeight + 90)}px`;
+}
+
+function renderChartsForTab(tabName = getActiveTabName()) {
+    if (!currentData) return;
+
+    if (tabName === 'overview') {
+        renderYearChart(currentData.yearly_stats);
+        renderJournalChartSmall(currentData.journal_stats.slice(0, 10));
+    } else if (tabName === 'trends') {
+        renderTrendChart(currentData.yearly_stats);
+    } else if (tabName === 'journals') {
+        renderJournalChart(currentData.journal_stats);
+    } else if (tabName === 'countries') {
+        renderCountryChart(currentData.country_stats);
+    } else if (tabName === 'authors') {
+        renderAuthorChart(currentData.author_stats);
+    } else if (tabName === 'concepts') {
+        renderConceptChart(currentData.concept_stats);
+    } else if (tabName === 'network' && currentNetworkData) {
+        displayNetwork(currentNetworkData);
+    } else if (tabName === 'citation' && currentCitationNetworkData) {
+        displayCitationNetwork(currentCitationNetworkData);
+    }
+}
+
 async function handleFileSelect(event) {
     const file = event.target?.files?.[0] || event?.[0];
     if (file) {
@@ -199,17 +260,22 @@ async function loadAnalysis(filename) {
         const authorCount = parseInt(document.getElementById('authorCount').value) || 50;
         const response = await fetch(`${BASE_PATH}/api/analysis/${encodeFilename(filename)}?author_count=${authorCount}`);
         const result = await response.json();
-        
-        if (result.success) {
-            currentData = result.analysis;
-            displayAnalysis(result.analysis);
-            loadNetwork(filename);
-            loadCitationNetwork(filename);
-            loadPapersList(filename);
-            hideStatus();
-            document.getElementById('tabsSection').style.display = 'block';
-            document.getElementById('contentSection').style.display = 'block';
+        if (!response.ok || !result.success) {
+            throw new Error(result.detail || '分析失败');
         }
+
+        currentData = result.analysis;
+        currentNetworkData = null;
+        currentCitationNetworkData = null;
+        resetPaperFilters();
+        document.getElementById('tabsSection').style.display = 'block';
+        document.getElementById('contentSection').style.display = 'block';
+
+        await loadPapersList(filename);
+        displayAnalysis(result.analysis);
+        await Promise.all([loadNetwork(filename), loadCitationNetwork(filename)]);
+        renderChartsForTab(getActiveTabName());
+        hideStatus();
     } catch (error) {
         showStatus('❌', '分析失败: ' + error.message);
     }
@@ -225,7 +291,14 @@ async function reloadAuthorChart() {
         const result = await response.json();
         
         if (result.success) {
-            renderAuthorChart(result.analysis.author_stats);
+            currentData = {
+                ...currentData,
+                author_stats: result.analysis.author_stats,
+                top_cited_authors: result.analysis.top_cited_authors
+            };
+            if (getActiveTabName() === 'authors') {
+                renderAuthorChart(result.analysis.author_stats);
+            }
             renderTopCitedAuthorsTable(result.analysis.top_cited_authors);
         }
     } catch (error) {
@@ -243,10 +316,12 @@ async function loadPapersList(filename) {
             selectedPaperIndices.clear();
             displayPapersList(result.papers);
             applyPaperFilters();
+            return true;
         }
     } catch (error) {
         console.error('加载论文列表失败:', error);
     }
+    return false;
 }
 
 function displayPapersList(papers) {
@@ -301,11 +376,15 @@ function applyPaperFilters() {
 }
 
 function clearPaperFilters() {
+    resetPaperFilters();
+    applyPaperFilters();
+}
+
+function resetPaperFilters() {
     document.getElementById('paperTextFilter').value = '';
     document.getElementById('paperStartYearFilter').value = '';
     document.getElementById('paperEndYearFilter').value = '';
     document.getElementById('paperOaFilter').value = 'all';
-    applyPaperFilters();
 }
 
 function renderAllPapersTable(papers) {
@@ -593,7 +672,10 @@ async function loadNetwork(filename) {
         const result = await response.json();
         
         if (result.success) {
-            displayNetwork(result.network);
+            currentNetworkData = result.network;
+            if (getActiveTabName() === 'network') {
+                displayNetwork(currentNetworkData);
+            }
         }
     } catch (error) {
         console.error('加载网络数据失败:', error);
@@ -606,7 +688,10 @@ async function loadCitationNetwork(filename) {
         const result = await response.json();
 
         if (result.success) {
-            displayCitationNetwork(result.network);
+            currentCitationNetworkData = result.network;
+            if (getActiveTabName() === 'citation') {
+                displayCitationNetwork(currentCitationNetworkData);
+            }
         }
     } catch (error) {
         console.error('加载引文网络失败:', error);
@@ -625,15 +710,9 @@ function displayAnalysis(analysis) {
     document.getElementById('totalJournals').textContent = totalJournals;
     document.getElementById('totalAuthors').textContent = totalAuthors;
     
-    renderYearChart(analysis.yearly_stats);
-    renderJournalChartSmall(analysis.journal_stats.slice(0, 10));
     renderTopCitedTable(analysis.citation_stats);
-    renderTrendChart(analysis.yearly_stats);
-    renderJournalChart(analysis.journal_stats);
-    renderCountryChart(analysis.country_stats);
-    renderAuthorChart(analysis.author_stats);
     renderTopCitedAuthorsTable(analysis.top_cited_authors);
-    renderConceptChart(analysis.concept_stats);
+    renderChartsForTab(getActiveTabName());
 }
 
 function renderTopCitedAuthorsTable(data) {
@@ -651,10 +730,8 @@ function renderTopCitedAuthorsTable(data) {
 }
 
 function renderYearChart(data) {
-    const chartDom = document.getElementById('yearChart');
-    if (charts.yearChart) charts.yearChart.dispose();
-    
-    charts.yearChart = echarts.init(chartDom);
+    const chart = initChart('yearChart', 'yearChart');
+    if (!chart) return;
     
     const option = {
         tooltip: { trigger: 'axis' },
@@ -675,14 +752,12 @@ function renderYearChart(data) {
         }]
     };
     
-    charts.yearChart.setOption(option);
+    chart.setOption(option);
 }
 
 function renderJournalChartSmall(data) {
-    const chartDom = document.getElementById('journalChartSmall');
-    if (charts.journalChartSmall) charts.journalChartSmall.dispose();
-    
-    charts.journalChartSmall = echarts.init(chartDom);
+    const chart = initChart('journalChartSmall', 'journalChartSmall');
+    if (!chart) return;
     
     const option = {
         tooltip: { trigger: 'item' },
@@ -694,7 +769,7 @@ function renderJournalChartSmall(data) {
         }]
     };
     
-    charts.journalChartSmall.setOption(option);
+    chart.setOption(option);
 }
 
 function renderTopCitedTable(data) {
@@ -711,10 +786,8 @@ function renderTopCitedTable(data) {
 }
 
 function renderTrendChart(data) {
-    const chartDom = document.getElementById('trendChart');
-    if (charts.trendChart) charts.trendChart.dispose();
-    
-    charts.trendChart = echarts.init(chartDom);
+    const chart = initChart('trendChart', 'trendChart');
+    if (!chart) return;
     
     const option = {
         tooltip: { trigger: 'axis' },
@@ -739,20 +812,23 @@ function renderTrendChart(data) {
         ]
     };
     
-    charts.trendChart.setOption(option);
+    chart.setOption(option);
 }
 
 function renderJournalChart(data) {
-    const chartDom = document.getElementById('journalChart');
-    if (charts.journalChart) charts.journalChart.dispose();
-    
-    charts.journalChart = echarts.init(chartDom);
+    setChartHeight('journalChart', data.length);
+    const chart = initChart('journalChart', 'journalChart');
+    if (!chart) return;
     
     const option = {
         tooltip: { trigger: 'axis', axisPointer: { type: 'shadow' } },
         grid: { left: '3%', right: '4%', bottom: '3%', containLabel: true },
         xAxis: { type: 'value' },
-        yAxis: { type: 'category', data: data.map(d => d.journal || '未知期刊').reverse() },
+        yAxis: {
+            type: 'category',
+            data: data.map(d => d.journal || '未知期刊').reverse(),
+            axisLabel: { interval: 0, width: 220, overflow: 'truncate' }
+        },
         series: [{
             type: 'bar',
             data: data.map(d => d.count).reverse(),
@@ -760,20 +836,19 @@ function renderJournalChart(data) {
         }]
     };
     
-    charts.journalChart.setOption(option);
+    chart.setOption(option);
 }
 
 function renderCountryChart(data) {
-    const chartDom = document.getElementById('countryChart');
-    if (charts.countryChart) charts.countryChart.dispose();
-    
-    charts.countryChart = echarts.init(chartDom);
+    setChartHeight('countryChart', data.length);
+    const chart = initChart('countryChart', 'countryChart');
+    if (!chart) return;
     
     const option = {
         tooltip: { trigger: 'axis', axisPointer: { type: 'shadow' } },
         grid: { left: '3%', right: '4%', bottom: '3%', containLabel: true },
         xAxis: { type: 'value' },
-        yAxis: { type: 'category', data: data.map(d => d.country).reverse() },
+        yAxis: { type: 'category', data: data.map(d => d.country).reverse(), axisLabel: { interval: 0 } },
         series: [{
             type: 'bar',
             data: data.map(d => d.count).reverse(),
@@ -781,20 +856,23 @@ function renderCountryChart(data) {
         }]
     };
     
-    charts.countryChart.setOption(option);
+    chart.setOption(option);
 }
 
 function renderAuthorChart(data) {
-    const chartDom = document.getElementById('authorChart');
-    if (charts.authorChart) charts.authorChart.dispose();
-    
-    charts.authorChart = echarts.init(chartDom);
+    setChartHeight('authorChart', data.length, 420, 24);
+    const chart = initChart('authorChart', 'authorChart');
+    if (!chart) return;
     
     const option = {
         tooltip: { trigger: 'axis', axisPointer: { type: 'shadow' } },
         grid: { left: '3%', right: '4%', bottom: '3%', containLabel: true },
         xAxis: { type: 'value' },
-        yAxis: { type: 'category', data: data.map(d => d.author).reverse(), axisLabel: { interval: 0, fontSize: 10 } },
+        yAxis: {
+            type: 'category',
+            data: data.map(d => d.author).reverse(),
+            axisLabel: { interval: 0, fontSize: 11, width: 190, overflow: 'truncate' }
+        },
         series: [{
             type: 'bar',
             data: data.map(d => d.count).reverse(),
@@ -802,20 +880,23 @@ function renderAuthorChart(data) {
         }]
     };
     
-    charts.authorChart.setOption(option);
+    chart.setOption(option);
 }
 
 function renderConceptChart(data) {
-    const chartDom = document.getElementById('conceptChart');
-    if (charts.conceptChart) charts.conceptChart.dispose();
-    
-    charts.conceptChart = echarts.init(chartDom);
+    setChartHeight('conceptChart', data.length);
+    const chart = initChart('conceptChart', 'conceptChart');
+    if (!chart) return;
     
     const option = {
         tooltip: { trigger: 'axis', axisPointer: { type: 'shadow' } },
         grid: { left: '3%', right: '4%', bottom: '3%', containLabel: true },
         xAxis: { type: 'value' },
-        yAxis: { type: 'category', data: data.map(d => d.concept).reverse() },
+        yAxis: {
+            type: 'category',
+            data: data.map(d => d.concept).reverse(),
+            axisLabel: { interval: 0, width: 220, overflow: 'truncate' }
+        },
         series: [{
             type: 'bar',
             data: data.map(d => d.count).reverse(),
@@ -828,14 +909,12 @@ function renderConceptChart(data) {
         }]
     };
     
-    charts.conceptChart.setOption(option);
+    chart.setOption(option);
 }
 
 function displayNetwork(data) {
-    const chartDom = document.getElementById('networkChart');
-    if (charts.networkChart) charts.networkChart.dispose();
-    
-    charts.networkChart = echarts.init(chartDom);
+    const chart = initChart('networkChart', 'networkChart');
+    if (!chart) return;
     
     const categories = [{ name: '作者' }];
     
@@ -856,20 +935,21 @@ function displayNetwork(data) {
         }]
     };
     
-    charts.networkChart.setOption(option);
+    chart.setOption(option);
 }
 
 function displayCitationNetwork(data) {
-    const chartDom = document.getElementById('citationNetworkChart');
     const summary = document.getElementById('citationNetworkSummary');
-    if (charts.citationNetworkChart) charts.citationNetworkChart.dispose();
-
-    charts.citationNetworkChart = echarts.init(chartDom);
-
     const nodes = data.nodes || [];
     const edges = data.edges || [];
+    const hasEdges = edges.length > 0;
     const maxCitations = Math.max(1, ...nodes.map(node => Number(node.value) || 0));
-    summary.textContent = `当前集合内 ${nodes.length} 篇文章，识别到 ${edges.length} 条集合内部引用关系`;
+    summary.textContent = hasEdges
+        ? `当前集合内 ${nodes.length} 篇文章，识别到 ${edges.length} 条集合内部引用关系`
+        : `当前集合内 ${nodes.length} 篇文章，暂未识别到集合内部引用关系；下图仍按总被引数显示每篇文章`;
+
+    const chart = initChart('citationNetworkChart', 'citationNetworkChart');
+    if (!chart) return;
 
     const option = {
         tooltip: {
@@ -887,17 +967,24 @@ function displayCitationNetwork(data) {
         series: [{
             name: '引文网络',
             type: 'graph',
-            layout: 'force',
+            layout: 'circular',
             data: nodes.map(node => ({
                 ...node,
-                symbolSize: 10 + (Math.sqrt(Number(node.value) || 0) / Math.sqrt(maxCitations)) * 44
+                symbolSize: 14 + (Math.sqrt(Number(node.value) || 0) / Math.sqrt(maxCitations)) * 46
             })),
             links: edges,
             roam: true,
             draggable: true,
             edgeSymbol: ['none', 'arrow'],
             edgeSymbolSize: 8,
-            label: { show: false },
+            label: {
+                show: nodes.length <= 60,
+                formatter: (params) => {
+                    const title = params.data.title || params.data.name || '';
+                    return title.length > 28 ? `${title.slice(0, 28)}...` : title;
+                },
+                fontSize: 9
+            },
             emphasis: {
                 focus: 'adjacency',
                 label: { show: true, formatter: '{b}', fontSize: 10 }
@@ -909,11 +996,11 @@ function displayCitationNetwork(data) {
                 curveness: 0.18
             },
             itemStyle: { color: '#2e7d59' },
-            force: { repulsion: 260, edgeLength: 140 }
+            circular: { rotateLabel: false }
         }]
     };
 
-    charts.citationNetworkChart.setOption(option);
+    chart.setOption(option);
 }
 
 function switchTab(tabName) {
@@ -936,9 +1023,13 @@ function switchTab(tabName) {
     }
     if (tabContent) {
         tabContent.classList.add('active');
+        if (tabName !== 'overview') {
+            tabContent.scrollIntoView({ block: 'start', behavior: 'smooth' });
+        }
     }
     
     setTimeout(() => {
+        renderChartsForTab(tabName);
         Object.values(charts).forEach(chart => {
             if (chart && typeof chart.resize === 'function') {
                 chart.resize();
