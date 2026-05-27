@@ -4,7 +4,7 @@ set -euo pipefail
 
 cd "$(dirname "$0")"
 
-DEFAULT_MESSAGE="Restrict searches to seismology journal whitelist"
+DEFAULT_MESSAGE="Add multi-source metadata enrichment"
 COMMIT_MESSAGE="${1:-$DEFAULT_MESSAGE}"
 
 echo "Current changes:"

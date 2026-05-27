@@ -20,6 +20,9 @@ import io
 import re
 import unicodedata
 import secrets
+import html
+from difflib import SequenceMatcher
+from urllib.parse import quote
 
 from backend.journal_whitelist import JOURNAL_WHITELIST_COUNT, is_allowed_journal
 
@@ -52,6 +55,30 @@ SESSION_COOKIE_NAME = "paperhot_session"
 SESSION_MAX_AGE = 60 * 60 * 24 * 180
 SESSION_ID_RE = re.compile(r"^[a-f0-9]{32}$")
 ADMIN_PASSWORD_ENV = "PAPERHOT_ADMIN_PASSWORD"
+PAPERHOT_CONTACT_EMAIL_ENV = "PAPERHOT_CONTACT_EMAIL"
+SEMANTIC_SCHOLAR_API_KEY_ENV = "SEMANTIC_SCHOLAR_API_KEY"
+UNPAYWALL_EMAIL_ENV = "UNPAYWALL_EMAIL"
+SEMANTIC_SCHOLAR_FIELDS = ",".join([
+    "paperId",
+    "externalIds",
+    "title",
+    "abstract",
+    "venue",
+    "year",
+    "publicationDate",
+    "authors",
+    "citationCount",
+    "referenceCount",
+    "isOpenAccess",
+    "openAccessPdf",
+    "references.paperId",
+    "references.externalIds",
+    "references.title",
+    "references.authors",
+    "references.year",
+    "references.venue",
+    "references.citationCount",
+])
 
 BASE_DIR = Path(__file__).parent.parent
 DATA_DIR = BASE_DIR / "data"
@@ -130,6 +157,12 @@ class DeletePapersRequest(BaseModel):
 
 class AppendPapersRequest(BaseModel):
     papers: List[Dict[str, Any]]
+
+class MetadataEnrichRequest(BaseModel):
+    max_papers: int = 300
+    crossref: bool = True
+    semantic_scholar: bool = True
+    unpaywall: bool = True
 
 def get_session_id(request: Request) -> str:
     session_id = getattr(request.state, "session_id", "")
@@ -660,6 +693,427 @@ async def title_search(request: TitleSearchRequest):
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
+def get_contact_email() -> str:
+    return (
+        os.getenv(PAPERHOT_CONTACT_EMAIL_ENV)
+        or os.getenv(UNPAYWALL_EMAIL_ENV)
+        or "paperhot@example.com"
+    )
+
+def build_request_headers(extra: Optional[Dict[str, str]] = None) -> Dict[str, str]:
+    headers = {
+        "User-Agent": f"PaperHot/1.0 (mailto:{get_contact_email()})",
+    }
+    if extra:
+        headers.update({key: value for key, value in extra.items() if value})
+    return headers
+
+def clean_api_text(value: Any) -> str:
+    if value is None:
+        return ""
+    if isinstance(value, list):
+        value = next((item for item in value if str(item).strip()), "")
+    text = html.unescape(str(value)).strip()
+    text = re.sub(r"<[^>]+>", " ", text)
+    return re.sub(r"\s+", " ", text).strip()
+
+def title_similarity(left: Any, right: Any) -> float:
+    left_title = normalize_title(left)
+    right_title = normalize_title(right)
+    if not left_title or not right_title:
+        return 0.0
+    return SequenceMatcher(None, left_title, right_title).ratio()
+
+def parse_crossref_date(message: Dict[str, Any]) -> tuple[str, str]:
+    for key in ("published-print", "published-online", "published", "issued"):
+        date_parts = (message.get(key) or {}).get("date-parts") or []
+        if not date_parts or not date_parts[0]:
+            continue
+        parts = [str(part).zfill(2) for part in date_parts[0]]
+        year = parts[0]
+        if len(parts) == 1:
+            return year, f"{year}-01-01"
+        if len(parts) == 2:
+            return year, f"{parts[0]}-{parts[1]}-01"
+        return year, f"{parts[0]}-{parts[1]}-{parts[2]}"
+    return "", ""
+
+def parse_crossref_authors(authors: Any) -> str:
+    names = []
+    for author in authors or []:
+        given = clean_api_text(author.get("given", ""))
+        family = clean_api_text(author.get("family", ""))
+        name = " ".join(part for part in [given, family] if part).strip()
+        if name:
+            names.append(name)
+    return "; ".join(names)
+
+def parse_crossref_reference(reference: Dict[str, Any]) -> Dict[str, Any]:
+    doi = normalize_doi(reference.get("DOI", ""))
+    return {
+        "id": f"doi:{doi}" if doi else "",
+        "doi": doi,
+        "title": clean_api_text(reference.get("article-title", "")),
+        "authors": clean_api_text(reference.get("author", "")),
+        "journal": clean_api_text(reference.get("journal-title", "")),
+        "year": clean_api_text(reference.get("year", "")),
+        "cited_by_count": 0,
+        "type": "reference",
+        "source": "Crossref",
+    }
+
+def parse_crossref_work(message: Dict[str, Any]) -> Dict[str, Any]:
+    year, publication_date = parse_crossref_date(message)
+    references = [
+        parse_crossref_reference(reference)
+        for reference in (message.get("reference") or [])[:250]
+    ]
+    references = [
+        reference
+        for reference in references
+        if reference.get("doi") or reference.get("title")
+    ]
+    return {
+        "doi": normalize_doi(message.get("DOI", "")),
+        "title": clean_api_text(message.get("title", "")),
+        "journal": clean_api_text(message.get("container-title", "")),
+        "year": year,
+        "publication_date": publication_date,
+        "authors": parse_crossref_authors(message.get("author")),
+        "cited_by_count": message.get("is-referenced-by-count", 0),
+        "references_count": message.get("reference-count", len(references)),
+        "reference_details": references,
+        "abstract": clean_api_text(message.get("abstract", "")),
+        "pdf_url": "",
+        "is_open_access": False,
+        "source": "Crossref",
+    }
+
+def fetch_crossref_metadata(record: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+    doi = normalize_doi(record.get("doi", ""))
+    title = clean_api_text(record.get("title", ""))
+    params = {"mailto": get_contact_email()}
+    headers = build_request_headers()
+
+    if doi:
+        url = f"https://api.crossref.org/works/{quote(doi, safe='')}"
+        response = requests.get(url, params=params, headers=headers, timeout=20)
+        if response.status_code == 404:
+            return None
+        response.raise_for_status()
+        return parse_crossref_work(response.json().get("message", {}))
+
+    if not title:
+        return None
+
+    response = requests.get(
+        "https://api.crossref.org/works",
+        params={**params, "query.title": title, "rows": 3},
+        headers=headers,
+        timeout=20,
+    )
+    response.raise_for_status()
+    items = ((response.json().get("message") or {}).get("items") or [])
+    for item in items:
+        candidate = parse_crossref_work(item)
+        if title_similarity(title, candidate.get("title", "")) < 0.74:
+            continue
+        journal = candidate.get("journal", "")
+        if journal and not is_allowed_journal(journal):
+            continue
+        return candidate
+    return None
+
+def semantic_scholar_headers() -> Dict[str, str]:
+    api_key = os.getenv(SEMANTIC_SCHOLAR_API_KEY_ENV, "").strip()
+    return build_request_headers({"x-api-key": api_key} if api_key else None)
+
+def parse_semantic_authors(authors: Any) -> str:
+    return "; ".join(
+        clean_api_text(author.get("name", ""))
+        for author in authors or []
+        if clean_api_text(author.get("name", ""))
+    )
+
+def parse_semantic_reference(reference: Dict[str, Any]) -> Dict[str, Any]:
+    external_ids = reference.get("externalIds") or {}
+    paper_id = clean_api_text(reference.get("paperId", ""))
+    doi = normalize_doi(external_ids.get("DOI", ""))
+    return {
+        "id": f"SemanticScholar:{paper_id}" if paper_id else (f"doi:{doi}" if doi else ""),
+        "semantic_scholar_id": paper_id,
+        "doi": doi,
+        "title": clean_api_text(reference.get("title", "")),
+        "authors": parse_semantic_authors(reference.get("authors")),
+        "journal": clean_api_text(reference.get("venue", "")),
+        "year": reference.get("year", ""),
+        "cited_by_count": reference.get("citationCount", 0),
+        "type": "reference",
+        "source": "Semantic Scholar",
+    }
+
+def parse_semantic_work(data: Dict[str, Any]) -> Dict[str, Any]:
+    external_ids = data.get("externalIds") or {}
+    references = [
+        parse_semantic_reference(reference)
+        for reference in (data.get("references") or [])[:250]
+    ]
+    references = [
+        reference
+        for reference in references
+        if reference.get("doi") or reference.get("title") or reference.get("semantic_scholar_id")
+    ]
+    open_pdf = data.get("openAccessPdf") or {}
+    return {
+        "doi": normalize_doi(external_ids.get("DOI", "")),
+        "title": clean_api_text(data.get("title", "")),
+        "journal": clean_api_text(data.get("venue", "")),
+        "year": data.get("year", ""),
+        "publication_date": clean_api_text(data.get("publicationDate", "")),
+        "authors": parse_semantic_authors(data.get("authors")),
+        "cited_by_count": data.get("citationCount", 0),
+        "references_count": data.get("referenceCount", len(references)),
+        "reference_details": references,
+        "abstract": clean_api_text(data.get("abstract", "")),
+        "pdf_url": clean_api_text(open_pdf.get("url", "")),
+        "is_open_access": bool(data.get("isOpenAccess") or open_pdf.get("url")),
+        "source": "Semantic Scholar",
+    }
+
+def fetch_semantic_scholar_metadata(record: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+    doi = normalize_doi(record.get("doi", ""))
+    title = clean_api_text(record.get("title", ""))
+    headers = semantic_scholar_headers()
+
+    if doi:
+        paper_id = quote(f"DOI:{doi}", safe=":")
+        response = requests.get(
+            f"https://api.semanticscholar.org/graph/v1/paper/{paper_id}",
+            params={"fields": SEMANTIC_SCHOLAR_FIELDS},
+            headers=headers,
+            timeout=20,
+        )
+        if response.status_code == 404:
+            return None
+        response.raise_for_status()
+        return parse_semantic_work(response.json())
+
+    if not title:
+        return None
+
+    response = requests.get(
+        "https://api.semanticscholar.org/graph/v1/paper/search",
+        params={"query": title, "limit": 3, "fields": SEMANTIC_SCHOLAR_FIELDS},
+        headers=headers,
+        timeout=20,
+    )
+    response.raise_for_status()
+    for item in response.json().get("data", []) or []:
+        candidate = parse_semantic_work(item)
+        if title_similarity(title, candidate.get("title", "")) < 0.74:
+            continue
+        journal = candidate.get("journal", "")
+        if journal and not is_allowed_journal(journal):
+            continue
+        return candidate
+    return None
+
+def fetch_unpaywall_metadata(record: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+    doi = normalize_doi(record.get("doi", ""))
+    if not doi:
+        return None
+
+    response = requests.get(
+        f"https://api.unpaywall.org/v2/{quote(doi, safe='')}",
+        params={"email": get_contact_email()},
+        headers=build_request_headers(),
+        timeout=20,
+    )
+    if response.status_code == 404:
+        return None
+    response.raise_for_status()
+    data = response.json()
+    best_location = data.get("best_oa_location") or {}
+    pdf_url = clean_api_text(best_location.get("url_for_pdf", "")) or clean_api_text(best_location.get("url", ""))
+    return {
+        "doi": normalize_doi(data.get("doi", doi)),
+        "title": clean_api_text(data.get("title", "")),
+        "journal": clean_api_text(data.get("journal_name", "")),
+        "year": data.get("year", ""),
+        "publication_date": "",
+        "authors": "",
+        "cited_by_count": "",
+        "references_count": "",
+        "reference_details": [],
+        "abstract": "",
+        "pdf_url": pdf_url,
+        "is_open_access": bool(data.get("is_oa") or pdf_url),
+        "source": "Unpaywall",
+    }
+
+def append_reference_details(existing: Any, incoming: List[Dict[str, Any]]) -> str:
+    details = parse_reference_details(existing)
+    seen = set()
+    merged = []
+
+    for item in [*details, *(incoming or [])]:
+        if not isinstance(item, dict):
+            continue
+        identity = (
+            normalize_doi(item.get("doi", ""))
+            or clean_api_text(item.get("id", "")).casefold()
+            or normalize_title(item.get("title", ""))
+        )
+        if not identity or identity in seen:
+            continue
+        seen.add(identity)
+        merged.append(item)
+
+    return json.dumps(merged[:500], ensure_ascii=False)
+
+def as_int_or_none(value: Any) -> Optional[int]:
+    try:
+        if value is None or str(value).strip() == "":
+            return None
+        return int(float(value))
+    except (TypeError, ValueError):
+        return None
+
+def merge_record_metadata(record: Dict[str, Any], metadata: Dict[str, Any]) -> bool:
+    changed = False
+    source = metadata.get("source", "")
+
+    for column in ("doi", "title", "publication_date", "authors", "abstract", "pdf_url"):
+        current = clean_api_text(record.get(column, ""))
+        candidate = clean_api_text(metadata.get(column, ""))
+        if candidate and (not current or current.lower() == "nan"):
+            record[column] = candidate
+            changed = True
+
+    current_journal = clean_api_text(record.get("journal", ""))
+    candidate_journal = clean_api_text(metadata.get("journal", ""))
+    if candidate_journal and (
+        not current_journal
+        or current_journal.lower() in {"nan", "unknown journal", "preprint"}
+    ):
+        record["journal"] = candidate_journal
+        changed = True
+
+    current_year = as_int_or_none(record.get("year", ""))
+    candidate_year = as_int_or_none(metadata.get("year", ""))
+    if candidate_year and not current_year:
+        record["year"] = candidate_year
+        changed = True
+
+    current_citations = as_int_or_none(record.get("cited_by_count", "")) or 0
+    candidate_citations = as_int_or_none(metadata.get("cited_by_count", "")) or 0
+    if candidate_citations > current_citations:
+        record["cited_by_count"] = candidate_citations
+        changed = True
+
+    current_refs = as_int_or_none(record.get("references_count", "")) or 0
+    candidate_refs = as_int_or_none(metadata.get("references_count", "")) or 0
+    if candidate_refs > current_refs:
+        record["references_count"] = candidate_refs
+        changed = True
+
+    if metadata.get("is_open_access") and not normalize_open_access(record.get("is_open_access", False)):
+        record["is_open_access"] = True
+        changed = True
+
+    before_details = clean_api_text(record.get("reference_details", ""))
+    record["reference_details"] = append_reference_details(
+        record.get("reference_details", ""),
+        metadata.get("reference_details", []),
+    )
+    if clean_api_text(record.get("reference_details", "")) != before_details:
+        changed = True
+
+    if changed and source:
+        record["search_sources"] = merge_search_sources(record.get("search_sources", ""), source)
+
+    return changed
+
+def enrich_papers_metadata_in_df(
+    df: pd.DataFrame,
+    max_papers: int = 300,
+    use_crossref: bool = True,
+    use_semantic_scholar: bool = True,
+    use_unpaywall: bool = True,
+) -> tuple[pd.DataFrame, Dict[str, Any]]:
+    df = normalize_papers_df(df).copy()
+    max_papers = max(1, min(int(max_papers or 300), 1000))
+    selected_indices = list(df.index[:max_papers])
+    source_hits = {"Crossref": 0, "Semantic Scholar": 0, "Unpaywall": 0}
+    source_errors = {"Crossref": 0, "Semantic Scholar": 0, "Unpaywall": 0}
+    papers_updated = 0
+
+    for idx in selected_indices:
+        record = {column: df.at[idx, column] for column in PAPER_COLUMNS}
+        row_changed = False
+
+        for source_name, enabled, fetcher in [
+            ("Crossref", use_crossref, fetch_crossref_metadata),
+            ("Semantic Scholar", use_semantic_scholar, fetch_semantic_scholar_metadata),
+            ("Unpaywall", use_unpaywall, fetch_unpaywall_metadata),
+        ]:
+            if not enabled:
+                continue
+            try:
+                metadata = fetcher(record)
+            except Exception:
+                source_errors[source_name] += 1
+                continue
+            if not metadata:
+                continue
+            source_hits[source_name] += 1
+            row_changed = merge_record_metadata(record, metadata) or row_changed
+
+        if row_changed:
+            papers_updated += 1
+            for column in PAPER_COLUMNS:
+                df.at[idx, column] = record.get(column, "")
+
+    stats = {
+        "processed_papers": len(selected_indices),
+        "papers_updated": papers_updated,
+        "source_hits": source_hits,
+        "source_errors": source_errors,
+        "truncated": len(df) > len(selected_indices),
+        "max_papers": max_papers,
+    }
+    return df, stats
+
+@app.post(base_prefix + "/api/papers/{filename}/enrich-metadata")
+async def enrich_paper_metadata(filename: str, payload: MetadataEnrichRequest, request: Request):
+    try:
+        paths = get_request_paths(request)
+        df = read_papers_csv(filename, paths["raw"])
+        updated_df, stats = enrich_papers_metadata_in_df(
+            df,
+            max_papers=payload.max_papers,
+            use_crossref=payload.crossref,
+            use_semantic_scholar=payload.semantic_scholar,
+            use_unpaywall=payload.unpaywall,
+        )
+        backup_path = write_papers_csv(
+            filename,
+            updated_df,
+            create_backup=True,
+            raw_dir=paths["raw"],
+            backup_dir=paths["backups"],
+        )
+        return safe_json_response({
+            "success": True,
+            "filename": filename,
+            "backup_path": str(backup_path) if backup_path else None,
+            **stats,
+        })
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
 def extract_paper_info(work: Dict[str, Any]) -> Dict[str, Any]:
     authors = []
     affiliations = []
@@ -1002,13 +1456,27 @@ async def get_citation_network(filename: str, request: Request):
 def build_citation_network(df):
     nodes = []
     edges = []
-    openalex_to_node = {}
+    reference_to_node = {}
+
+    def add_reference_key(value: Any, node_id: str):
+        key = clean_api_text(value).casefold()
+        if key:
+            reference_to_node[key] = node_id
 
     for idx, row in df.iterrows():
         openalex_id = str(row.get("id", "")).strip()
         node_id = openalex_id if openalex_id and openalex_id.lower() != "nan" else f"row_{idx}"
         if openalex_id and openalex_id.lower() != "nan":
-            openalex_to_node[openalex_id] = node_id
+            add_reference_key(openalex_id, node_id)
+
+        doi = normalize_doi(row.get("doi", ""))
+        if doi:
+            add_reference_key(f"doi:{doi}", node_id)
+            add_reference_key(doi, node_id)
+
+        title_key = normalize_title(row.get("title", ""))
+        if title_key:
+            add_reference_key(f"title:{title_key}", node_id)
 
         cited_by = row.get("cited_by_count", 0)
         try:
@@ -1033,23 +1501,54 @@ def build_citation_network(df):
     internal_citation_counts = {node["id"]: 0 for node in nodes}
     seen_edges = set()
 
+    def target_node_for_reference(reference: Any) -> Optional[str]:
+        raw_reference = clean_api_text(reference)
+        normalized_doi = normalize_doi(raw_reference)
+        lookup_keys = [
+            raw_reference.casefold(),
+            f"doi:{normalized_doi}".casefold() if normalized_doi else "",
+            normalized_doi.casefold() if normalized_doi else "",
+            f"title:{normalize_title(raw_reference)}".casefold() if normalize_title(raw_reference) else "",
+        ]
+        for key in lookup_keys:
+            if key and key in reference_to_node:
+                return reference_to_node[key]
+        return None
+
+    def target_node_for_reference_detail(reference: Dict[str, Any]) -> Optional[str]:
+        lookup_values = [
+            reference.get("id", ""),
+            reference.get("doi", ""),
+            f"doi:{normalize_doi(reference.get('doi', ''))}" if normalize_doi(reference.get("doi", "")) else "",
+            f"title:{normalize_title(reference.get('title', ''))}" if normalize_title(reference.get("title", "")) else "",
+        ]
+        for value in lookup_values:
+            target = target_node_for_reference(value)
+            if target:
+                return target
+        return None
+
+    def add_citation_edge(source_node: str, target_node: Optional[str]):
+        if not target_node or target_node == source_node:
+            return
+        edge_key = (source_node, target_node)
+        if edge_key in seen_edges:
+            return
+        seen_edges.add(edge_key)
+        internal_citation_counts[target_node] = internal_citation_counts.get(target_node, 0) + 1
+        edges.append({
+            "source": source_node,
+            "target": target_node,
+            "value": 1,
+        })
+
     for idx, row in df.iterrows():
         source_openalex_id = str(row.get("id", "")).strip()
         source_node = source_openalex_id if source_openalex_id and source_openalex_id.lower() != "nan" else f"row_{idx}"
         for reference in parse_references(row.get("references", "")):
-            target_node = openalex_to_node.get(reference)
-            if not target_node or target_node == source_node:
-                continue
-            edge_key = (source_node, target_node)
-            if edge_key in seen_edges:
-                continue
-            seen_edges.add(edge_key)
-            internal_citation_counts[target_node] = internal_citation_counts.get(target_node, 0) + 1
-            edges.append({
-                "source": source_node,
-                "target": target_node,
-                "value": 1,
-            })
+            add_citation_edge(source_node, target_node_for_reference(reference))
+        for reference in parse_reference_details(row.get("reference_details", "")):
+            add_citation_edge(source_node, target_node_for_reference_detail(reference))
 
     for node in nodes:
         node["internal_citations"] = internal_citation_counts.get(node["id"], 0)

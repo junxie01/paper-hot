@@ -4,7 +4,7 @@
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>PaperHot - 计量文献学统计工具</title>
-    <link rel="stylesheet" href="/paper-hot/static/css/style.css?v=20260527-2">
+    <link rel="stylesheet" href="/paper-hot/static/css/style.css?v=20260527-3">
     <script src="https://cdn.jsdelivr.net/npm/echarts@5.4.3/dist/echarts.min.js"></script>
 </head>
 <body>
@@ -126,6 +126,7 @@
                     <div class="papers-toolbar">
                         <h4>📄 全部文章</h4>
                         <div class="papers-actions">
+                            <button id="enrichMetadataBtn" class="btn btn-secondary">多源补全信息</button>
                             <button id="deleteSelectedBtn" class="btn btn-danger">删除选中</button>
                         </div>
                     </div>
@@ -152,6 +153,7 @@
                         </div>
                         <button id="clearPaperFiltersBtn" class="btn btn-secondary">清空筛选</button>
                     </div>
+                    <div id="metadataEnrichStatus" class="paper-filter-summary"></div>
                     <div id="paperFilterSummary" class="paper-filter-summary"></div>
                     <div class="table-scroll">
                         <table id="allPapersTable" class="data-table">
@@ -307,6 +309,6 @@
         </div>
     </div>
 
-    <script src="/paper-hot/static/js/app.js?v=20260527-2"></script>
+    <script src="/paper-hot/static/js/app.js?v=20260527-3"></script>
 </body>
 </html>

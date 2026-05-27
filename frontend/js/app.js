@@ -73,6 +73,7 @@ function setupEventListeners() {
     document.getElementById('paperOaFilter').addEventListener('change', applyPaperFilters);
     document.getElementById('citationNetworkLimit').addEventListener('change', handleCitationNetworkLimitChange);
     document.getElementById('enrichReferencesBtn').addEventListener('click', enrichReferences);
+    document.getElementById('enrichMetadataBtn').addEventListener('click', enrichMetadata);
     document.getElementById('clearPaperFiltersBtn').addEventListener('click', clearPaperFilters);
     document.getElementById('deleteSelectedBtn').addEventListener('click', deleteSelectedPapers);
     document.getElementById('selectAllPapers').addEventListener('change', toggleSelectAllPapers);
@@ -898,6 +899,55 @@ async function enrichReferences() {
     } finally {
         button.disabled = false;
         button.textContent = '补全引用信息';
+    }
+}
+
+async function enrichMetadata() {
+    if (!currentFilename) {
+        alert('请先搜索或上传文献数据');
+        return;
+    }
+
+    const status = document.getElementById('metadataEnrichStatus');
+    const button = document.getElementById('enrichMetadataBtn');
+    status.textContent = '正在用 Crossref、Semantic Scholar、Unpaywall 补全文献信息...';
+    button.disabled = true;
+    button.textContent = '补全中...';
+
+    try {
+        const response = await fetch(`${BASE_PATH}/api/papers/${encodeFilename(currentFilename)}/enrich-metadata`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+                max_papers: 300,
+                crossref: true,
+                semantic_scholar: true,
+                unpaywall: true
+            })
+        });
+        const result = await response.json();
+        if (!response.ok || !result.success) {
+            throw new Error(result.detail || '补全失败');
+        }
+
+        const hits = result.source_hits || {};
+        const errors = result.source_errors || {};
+        const limitNote = result.truncated ? `；文献较多，本次先处理前 ${result.processed_papers} 篇` : '';
+        const errorNote = Object.values(errors).some(value => Number(value) > 0)
+            ? `；部分来源限速或失败 ${Object.entries(errors).map(([name, count]) => `${name} ${count}`).join('，')}`
+            : '';
+        status.textContent =
+            `多源补全完成：更新 ${result.papers_updated} / ${result.processed_papers} 篇；Crossref ${hits.Crossref || 0}，Semantic Scholar ${hits['Semantic Scholar'] || 0}，Unpaywall ${hits.Unpaywall || 0}${limitNote}${errorNote}`;
+
+        await loadAnalysis(currentFilename, {
+            resetFilters: false,
+            activeTab: getActiveTabName() || 'overview'
+        });
+    } catch (error) {
+        status.textContent = '多源补全失败: ' + error.message;
+    } finally {
+        button.disabled = false;
+        button.textContent = '多源补全信息';
     }
 }
 
