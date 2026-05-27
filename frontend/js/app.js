@@ -403,7 +403,7 @@ async function searchPapers() {
             currentData = result.papers;
             
             const modeText = result.search_mode === 'deep' ? '深度检索' : '普通检索';
-            showStatus('✅', `${modeText}成功获取 ${result.count} 篇文献！`);
+            showStatus('✅', `${modeText}在期刊白名单内获取 ${result.count} 篇文献！`);
             setTimeout(() => {
                 hideStatus();
                 loadAnalysis(currentFilename);
@@ -699,7 +699,7 @@ async function searchTitleCandidates() {
         }
 
         titleSearchResults = result.papers || [];
-        status.textContent = `找到 ${titleSearchResults.length} 个候选结果`;
+        status.textContent = `在期刊白名单内找到 ${titleSearchResults.length} 个候选结果`;
         renderTitleSearchResults();
     } catch (error) {
         status.textContent = '搜索失败: ' + error.message;
@@ -709,7 +709,7 @@ async function searchTitleCandidates() {
 function renderTitleSearchResults() {
     const container = document.getElementById('titleSearchResults');
     if (!titleSearchResults.length) {
-        container.innerHTML = '<div class="muted-cell">没有候选结果</div>';
+        container.innerHTML = '<div class="muted-cell">期刊白名单内没有候选结果</div>';
         return;
     }
 

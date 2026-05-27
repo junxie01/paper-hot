@@ -4,7 +4,7 @@ set -euo pipefail
 
 cd "$(dirname "$0")"
 
-DEFAULT_MESSAGE="Add deep search and reference enrichment"
+DEFAULT_MESSAGE="Restrict searches to seismology journal whitelist"
 COMMIT_MESSAGE="${1:-$DEFAULT_MESSAGE}"
 
 echo "Current changes:"
@@ -13,7 +13,7 @@ echo
 
 echo "Staging tracked project files only..."
 git add -u
-git add push_safe_update.sh
+git add backend/journal_whitelist.py push_safe_update.sh
 
 if git diff --cached --quiet; then
     echo "No tracked changes are staged. Nothing to commit."

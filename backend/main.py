@@ -21,6 +21,8 @@ import re
 import unicodedata
 import secrets
 
+from backend.journal_whitelist import JOURNAL_WHITELIST_COUNT, is_allowed_journal
+
 
 class CustomJSONEncoder(json.JSONEncoder):
     def default(self, obj):
@@ -480,6 +482,7 @@ async def search_papers(payload: SearchRequest, request: Request):
             "papers": papers,
             "csv_path": str(csv_path),
             "search_mode": "deep" if payload.deep_search else "normal",
+            "journal_whitelist_count": JOURNAL_WHITELIST_COUNT,
         }
         return safe_json_response(result)
     except HTTPException:
@@ -499,12 +502,13 @@ def fetch_openalex_works(params: Dict[str, Any], max_results: int, source_label:
     papers = []
     per_page = 200
     page = 1
+    max_candidate_pages = min(50, max(3, int(np.ceil(max_results * 8 / per_page))))
     base_url = "https://api.openalex.org/works"
 
-    while len(papers) < max_results:
+    while len(papers) < max_results and page <= max_candidate_pages:
         request_params = {
             **params,
-            "per-page": min(per_page, max_results - len(papers)),
+            "per-page": per_page,
             "page": page,
         }
 
@@ -517,8 +521,12 @@ def fetch_openalex_works(params: Dict[str, Any], max_results: int, source_label:
 
         for work in data["results"]:
             paper = extract_paper_info(work)
+            if not is_allowed_journal(paper.get("journal", "")):
+                continue
             paper["search_sources"] = source_label
             papers.append(paper)
+            if len(papers) >= max_results:
+                break
 
         page += 1
         if len(data["results"]) < per_page:
@@ -628,15 +636,10 @@ def fetch_from_openalex_deep(keyword: str, max_results: int, start_year: Optiona
     return merge_paper_results(result_sets, max_results)
 
 def search_title_from_openalex(title: str, max_results: int = 8) -> List[Dict[str, Any]]:
-    base_url = "https://api.openalex.org/works"
     params = {
         "filter": f"title.search:{title}",
-        "per-page": max(1, min(max_results, 25))
     }
-    response = requests.get(base_url, params=params, timeout=30)
-    response.raise_for_status()
-    data = response.json()
-    return [extract_paper_info(work) for work in data.get("results", [])]
+    return fetch_openalex_works(params, max_results, "OpenAlex title")
 
 @app.post(f"{base_prefix}/api/title-search")
 async def title_search(request: TitleSearchRequest):
@@ -645,7 +648,12 @@ async def title_search(request: TitleSearchRequest):
             raise HTTPException(status_code=400, detail="Title is required")
 
         papers = search_title_from_openalex(request.title.strip(), request.max_results)
-        result = {"success": True, "count": len(papers), "papers": papers}
+        result = {
+            "success": True,
+            "count": len(papers),
+            "papers": papers,
+            "journal_whitelist_count": JOURNAL_WHITELIST_COUNT,
+        }
         return safe_json_response(result)
     except HTTPException:
         raise
