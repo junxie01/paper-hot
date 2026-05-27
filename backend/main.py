@@ -108,6 +108,8 @@ PAPER_COLUMNS = [
     "type",
     "is_open_access",
     "pdf_url",
+    "search_sources",
+    "reference_details",
 ]
 
 class SearchRequest(BaseModel):
@@ -115,6 +117,7 @@ class SearchRequest(BaseModel):
     max_results: int = 500
     start_year: Optional[int] = None
     end_year: Optional[int] = None
+    deep_search: bool = False
 
 class TitleSearchRequest(BaseModel):
     title: str
@@ -273,6 +276,8 @@ def normalize_papers_df(df: pd.DataFrame) -> pd.DataFrame:
         "abstract",
         "type",
         "pdf_url",
+        "search_sources",
+        "reference_details",
     ]
     for column in text_columns:
         df[column] = df[column].fillna("").astype(str)
@@ -336,6 +341,30 @@ def paper_identity(row: pd.Series) -> Optional[str]:
 
     return None
 
+def paper_identity_from_mapping(paper: Dict[str, Any]) -> Optional[str]:
+    openalex_id = str(paper.get("id", "")).strip().lower()
+    if openalex_id and openalex_id != "nan":
+        return f"id:{openalex_id}"
+
+    doi = normalize_doi(paper.get("doi", ""))
+    if doi:
+        return f"doi:{doi}"
+
+    title = normalize_title(paper.get("title", ""))
+    if title:
+        return f"title:{title}"
+
+    return None
+
+def merge_search_sources(existing: Any, new_source: str) -> str:
+    sources = []
+    for value in split_values(existing):
+        if value and value not in sources:
+            sources.append(value)
+    if new_source and new_source not in sources:
+        sources.append(new_source)
+    return "; ".join(sources)
+
 def dedupe_papers(df: pd.DataFrame) -> tuple[pd.DataFrame, int]:
     seen = set()
     rows = []
@@ -365,6 +394,22 @@ def parse_references(value: Any) -> List[str]:
     except Exception:
         pass
     return [part.strip() for part in text.split(";") if part.strip()]
+
+def parse_reference_details(value: Any) -> List[Dict[str, Any]]:
+    if isinstance(value, list):
+        return [item for item in value if isinstance(item, dict)]
+    if pd.isna(value):
+        return []
+    text = str(value).strip()
+    if not text or text == "nan":
+        return []
+    try:
+        parsed = json.loads(text)
+        if isinstance(parsed, list):
+            return [item for item in parsed if isinstance(item, dict)]
+    except Exception:
+        pass
+    return []
 
 def get_total_stats(df: pd.DataFrame) -> Dict[str, int]:
     journals = {
@@ -403,12 +448,20 @@ async def search_papers(payload: SearchRequest, request: Request):
     try:
         paths = get_request_paths(request)
         max_results = max(1, min(payload.max_results, 5000))
-        papers = fetch_from_openalex(
-            keyword=payload.keyword,
-            max_results=max_results,
-            start_year=payload.start_year,
-            end_year=payload.end_year
-        )
+        if payload.deep_search:
+            papers = fetch_from_openalex_deep(
+                keyword=payload.keyword,
+                max_results=max_results,
+                start_year=payload.start_year,
+                end_year=payload.end_year
+            )
+        else:
+            papers = fetch_from_openalex(
+                keyword=payload.keyword,
+                max_results=max_results,
+                start_year=payload.start_year,
+                end_year=payload.end_year
+            )
         
         df = pd.DataFrame(papers)
         safe_keyword = "".join(
@@ -417,7 +470,7 @@ async def search_papers(payload: SearchRequest, request: Request):
         ).strip().replace(" ", "_")
         if not safe_keyword:
             safe_keyword = f"search_{uuid.uuid4().hex[:8]}"
-        filename = f"{safe_keyword}_papers.csv"
+        filename = f"{safe_keyword}_{'deep_' if payload.deep_search else ''}papers.csv"
         filename, csv_path = get_unique_csv_path(filename, paths["raw"])
         write_papers_csv(filename, df, create_backup=False, raw_dir=paths["raw"], backup_dir=paths["backups"])
         
@@ -425,7 +478,8 @@ async def search_papers(payload: SearchRequest, request: Request):
             "success": True,
             "count": len(papers),
             "papers": papers,
-            "csv_path": str(csv_path)
+            "csv_path": str(csv_path),
+            "search_mode": "deep" if payload.deep_search else "normal",
         }
         return safe_json_response(result)
     except HTTPException:
@@ -433,44 +487,145 @@ async def search_papers(payload: SearchRequest, request: Request):
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
-def fetch_from_openalex(keyword: str, max_results: int, start_year: Optional[int], end_year: Optional[int]):
-    papers = []
-    per_page = 200
-    page = 1
-    
-    base_url = "https://api.openalex.org/works"
-    
-    filters = [f"title_and_abstract.search:{keyword}"]
+def build_date_filters(start_year: Optional[int], end_year: Optional[int]) -> List[str]:
+    filters = []
     if start_year:
         filters.append(f"from_publication_date:{start_year}-01-01")
     if end_year:
         filters.append(f"to_publication_date:{end_year}-12-31")
-    
-    filter_str = ",".join(filters)
-    
+    return filters
+
+def fetch_openalex_works(params: Dict[str, Any], max_results: int, source_label: str) -> List[Dict[str, Any]]:
+    papers = []
+    per_page = 200
+    page = 1
+    base_url = "https://api.openalex.org/works"
+
     while len(papers) < max_results:
-        params = {
-            "filter": filter_str,
+        request_params = {
+            **params,
             "per-page": min(per_page, max_results - len(papers)),
-            "page": page
+            "page": page,
         }
-        
-        response = requests.get(base_url, params=params, timeout=30)
+
+        response = requests.get(base_url, params=request_params, timeout=30)
         response.raise_for_status()
         data = response.json()
-        
+
         if not data.get("results"):
             break
-            
+
         for work in data["results"]:
             paper = extract_paper_info(work)
+            paper["search_sources"] = source_label
             papers.append(paper)
-            
+
         page += 1
         if len(data["results"]) < per_page:
             break
-            
+
     return papers[:max_results]
+
+def fetch_from_openalex(keyword: str, max_results: int, start_year: Optional[int], end_year: Optional[int]):
+    filters = build_date_filters(start_year, end_year)
+    params: Dict[str, Any] = {"search": keyword}
+    if filters:
+        params["filter"] = ",".join(filters)
+    return fetch_openalex_works(params, max_results, "OpenAlex fulltext")
+
+def build_keyword_variants(keyword: str) -> List[str]:
+    base = clean_text(keyword)
+    if not base:
+        return []
+
+    variants = [base]
+    replacements = [
+        ("-", " "),
+        ("_", " "),
+        (" ", "-"),
+    ]
+    for old, new in replacements:
+        if old in base:
+            variants.append(base.replace(old, new))
+
+    compact = re.sub(r"[\s_-]+", "", base)
+    if compact and compact != base:
+        variants.append(compact)
+
+    lower = base.casefold()
+    domain_expansions = {
+        "icequake": ["ice quake", "cryoseism", "glacier seismicity", "glacial earthquake"],
+        "ice quake": ["icequake", "cryoseism", "glacier seismicity", "glacial earthquake"],
+        "surface wave": ["surface-wave", "Rayleigh wave", "Love wave", "ambient noise tomography"],
+        "surface-wave": ["surface wave", "Rayleigh wave", "Love wave", "ambient noise tomography"],
+    }
+    variants.extend(domain_expansions.get(lower, []))
+
+    unique = []
+    seen = set()
+    for variant in variants:
+        normalized = clean_text(variant)
+        key = normalized.casefold()
+        if normalized and key not in seen:
+            unique.append(normalized)
+            seen.add(key)
+    return unique[:8]
+
+def merge_paper_results(result_sets: List[tuple[str, List[Dict[str, Any]]]], max_results: int) -> List[Dict[str, Any]]:
+    merged: Dict[str, Dict[str, Any]] = {}
+    order = []
+
+    for source_label, papers in result_sets:
+        for paper in papers:
+            identity = paper_identity_from_mapping(paper) or f"row:{uuid.uuid4().hex}"
+            if identity not in merged:
+                paper["search_sources"] = merge_search_sources(paper.get("search_sources", ""), source_label)
+                merged[identity] = paper
+                order.append(identity)
+            else:
+                merged[identity]["search_sources"] = merge_search_sources(
+                    merged[identity].get("search_sources", ""),
+                    source_label,
+                )
+
+    def sort_number(value: Any) -> int:
+        try:
+            return int(float(value))
+        except (TypeError, ValueError):
+            return 0
+
+    records = [merged[key] for key in order]
+    records.sort(key=lambda paper: (
+        -sort_number(paper.get("cited_by_count")),
+        -sort_number(paper.get("year")),
+        str(paper.get("title", "")).casefold(),
+    ))
+    return records[:max_results]
+
+def fetch_from_openalex_deep(keyword: str, max_results: int, start_year: Optional[int], end_year: Optional[int]):
+    filters = build_date_filters(start_year, end_year)
+    result_sets: List[tuple[str, List[Dict[str, Any]]]] = []
+    variants = build_keyword_variants(keyword)
+    per_query_limit = min(max_results, max(80, max_results // 2))
+
+    for index, term in enumerate(variants):
+        search_params: Dict[str, Any] = {"search": term}
+        if filters:
+            search_params["filter"] = ",".join(filters)
+        label = "OpenAlex fulltext" if index == 0 else f"OpenAlex fulltext: {term}"
+        result_sets.append((label, fetch_openalex_works(search_params, per_query_limit, label)))
+
+    primary_term = variants[0] if variants else keyword
+    filter_term = primary_term.replace(",", " ")
+    for filter_name, label in [
+        ("title.search", "OpenAlex title"),
+        ("title_and_abstract.search", "OpenAlex title/abstract"),
+    ]:
+        strategy_filters = [f"{filter_name}:{filter_term}", *filters]
+        params = {"filter": ",".join(strategy_filters)}
+        result_sets.append((label, fetch_openalex_works(params, per_query_limit, label)))
+
+    return merge_paper_results(result_sets, max_results)
 
 def search_title_from_openalex(title: str, max_results: int = 8) -> List[Dict[str, Any]]:
     base_url = "https://api.openalex.org/works"
@@ -520,15 +675,39 @@ def extract_paper_info(work: Dict[str, Any]) -> Dict[str, Any]:
     
     cited_by = work.get("cited_by_count", 0)
     references = work.get("referenced_works", [])
-    
+
     concepts = []
     try:
         concepts = [c["display_name"] for c in work.get("concepts", [])[:10] if c.get("display_name")]
     except Exception:
         pass
-    
+
     open_access = work.get("open_access", {}) or {}
-    
+    journal_name = get_openalex_journal_name(work)
+
+    return {
+        "id": work.get("id", ""),
+        "doi": work.get("doi", ""),
+        "title": work.get("title", ""),
+        "journal": journal_name,
+        "year": work.get("publication_year", ""),
+        "publication_date": work.get("publication_date", ""),
+        "authors": "; ".join(authors),
+        "affiliations": "; ".join(list(set(affiliations))),
+        "countries": "; ".join(list(set(countries))),
+        "cited_by_count": cited_by,
+        "references_count": len(references),
+        "references": json.dumps(references),
+        "concepts": "; ".join(concepts),
+        "abstract": work.get("abstract", ""),
+        "type": work.get("type", ""),
+        "is_open_access": open_access.get("is_oa", False),
+        "pdf_url": open_access.get("oa_url", ""),
+        "search_sources": "",
+        "reference_details": "[]",
+    }
+
+def get_openalex_journal_name(work: Dict[str, Any]) -> str:
     # 获取期刊名称，尝试多个可能的字段
     journal_name = ""
     try:
@@ -559,25 +738,28 @@ def extract_paper_info(work: Dict[str, Any]) -> Dict[str, Any]:
                 
     except Exception:
         journal_name = "Unknown Journal"
-    
+
+    return journal_name
+
+def extract_reference_info(work: Dict[str, Any]) -> Dict[str, Any]:
+    authors = []
+    try:
+        for authorship in work.get("authorships", [])[:8]:
+            author = authorship.get("author", {})
+            if author and author.get("display_name"):
+                authors.append(author["display_name"])
+    except Exception:
+        pass
+
     return {
         "id": work.get("id", ""),
         "doi": work.get("doi", ""),
         "title": work.get("title", ""),
-        "journal": journal_name,
-        "year": work.get("publication_year", ""),
-        "publication_date": work.get("publication_date", ""),
         "authors": "; ".join(authors),
-        "affiliations": "; ".join(list(set(affiliations))),
-        "countries": "; ".join(list(set(countries))),
-        "cited_by_count": cited_by,
-        "references_count": len(references),
-        "references": json.dumps(references),
-        "concepts": "; ".join(concepts),
-        "abstract": work.get("abstract", ""),
+        "journal": get_openalex_journal_name(work),
+        "year": work.get("publication_year", ""),
+        "cited_by_count": work.get("cited_by_count", 0),
         "type": work.get("type", ""),
-        "is_open_access": open_access.get("is_oa", False),
-        "pdf_url": open_access.get("oa_url", "")
     }
 
 @app.post(f"{base_prefix}/api/upload")
@@ -836,6 +1018,8 @@ def build_citation_network(df):
             "year": "" if pd.isna(year) else str(year),
             "value": cited_by,
             "index": int(idx),
+            "reference_details": parse_reference_details(row.get("reference_details", "")),
+            "resolved_references": len(parse_reference_details(row.get("reference_details", ""))),
         })
 
     internal_citation_counts = {node["id"]: 0 for node in nodes}
@@ -863,6 +1047,95 @@ def build_citation_network(df):
         node["internal_citations"] = internal_citation_counts.get(node["id"], 0)
 
     return {"nodes": nodes, "edges": edges}
+
+def fetch_openalex_references_by_ids(reference_ids: List[str]) -> Dict[str, Dict[str, Any]]:
+    metadata: Dict[str, Dict[str, Any]] = {}
+    base_url = "https://api.openalex.org/works"
+
+    for start in range(0, len(reference_ids), 50):
+        chunk = reference_ids[start:start + 50]
+        if not chunk:
+            continue
+
+        params = {
+            "filter": f"ids.openalex:{'|'.join(chunk)}",
+            "per-page": len(chunk),
+        }
+        response = requests.get(base_url, params=params, timeout=30)
+        response.raise_for_status()
+        for work in response.json().get("results", []):
+            info = extract_reference_info(work)
+            openalex_id = str(info.get("id", "")).strip()
+            if openalex_id:
+                metadata[openalex_id] = info
+                metadata[openalex_id.rsplit("/", 1)[-1]] = info
+
+    return metadata
+
+def enrich_reference_details_in_df(df: pd.DataFrame, max_unique_references: int = 1500) -> tuple[pd.DataFrame, Dict[str, Any]]:
+    df = normalize_papers_df(df).copy()
+    unique_references = []
+    seen = set()
+
+    for _, row in df.iterrows():
+        for reference_id in parse_references(row.get("references", "")):
+            if reference_id not in seen:
+                unique_references.append(reference_id)
+                seen.add(reference_id)
+
+    selected_references = unique_references[:max_unique_references]
+    reference_metadata = fetch_openalex_references_by_ids(selected_references) if selected_references else {}
+    papers_updated = 0
+
+    for idx, row in df.iterrows():
+        details = []
+        for reference_id in parse_references(row.get("references", "")):
+            info = reference_metadata.get(reference_id)
+            if info:
+                details.append(info)
+        if details:
+            papers_updated += 1
+        df.at[idx, "reference_details"] = json.dumps(details, ensure_ascii=False)
+        df.at[idx, "references_count"] = len(parse_references(row.get("references", "")))
+
+    enriched_ids = {
+        str(info.get("id", "")).strip()
+        for info in reference_metadata.values()
+        if str(info.get("id", "")).strip()
+    }
+    stats = {
+        "total_references": sum(len(parse_references(row.get("references", ""))) for _, row in df.iterrows()),
+        "unique_references": len(unique_references),
+        "queried_references": len(selected_references),
+        "enriched_references": len(enriched_ids),
+        "papers_updated": papers_updated,
+        "truncated": len(unique_references) > len(selected_references),
+    }
+    return df, stats
+
+@app.post(base_prefix + "/api/references/{filename}/enrich")
+async def enrich_references(filename: str, request: Request):
+    try:
+        paths = get_request_paths(request)
+        df = read_papers_csv(filename, paths["raw"])
+        updated_df, stats = enrich_reference_details_in_df(df)
+        backup_path = write_papers_csv(
+            filename,
+            updated_df,
+            create_backup=True,
+            raw_dir=paths["raw"],
+            backup_dir=paths["backups"],
+        )
+        return safe_json_response({
+            "success": True,
+            "filename": filename,
+            "backup_path": str(backup_path) if backup_path else None,
+            **stats,
+        })
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
 
 @app.get(base_prefix + "/api/papers/{filename}")
 async def get_papers_list(filename: str, request: Request):

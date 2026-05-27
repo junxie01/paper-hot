@@ -72,6 +72,7 @@ function setupEventListeners() {
     document.getElementById('paperEndYearFilter').addEventListener('input', applyPaperFilters);
     document.getElementById('paperOaFilter').addEventListener('change', applyPaperFilters);
     document.getElementById('citationNetworkLimit').addEventListener('change', handleCitationNetworkLimitChange);
+    document.getElementById('enrichReferencesBtn').addEventListener('click', enrichReferences);
     document.getElementById('clearPaperFiltersBtn').addEventListener('click', clearPaperFilters);
     document.getElementById('deleteSelectedBtn').addEventListener('click', deleteSelectedPapers);
     document.getElementById('selectAllPapers').addEventListener('change', toggleSelectAllPapers);
@@ -373,19 +374,26 @@ async function searchPapers() {
     const maxResults = parseInt(document.getElementById('maxResults').value) || 500;
     const startYear = document.getElementById('startYear').value ? parseInt(document.getElementById('startYear').value) : null;
     const endYear = document.getElementById('endYear').value ? parseInt(document.getElementById('endYear').value) : null;
+    const deepSearch = document.getElementById('deepSearch').checked;
     
     if (!keyword) {
         alert('请输入关键词');
         return;
     }
     
-    showStatus('⏳', '正在搜索文献...');
+    showStatus('⏳', deepSearch ? '正在深度检索文献，可能需要更久...' : '正在搜索文献...');
     
     try {
         const response = await fetch(`${BASE_PATH}/api/search`, {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ keyword, max_results: maxResults, start_year: startYear, end_year: endYear })
+            body: JSON.stringify({
+                keyword,
+                max_results: maxResults,
+                start_year: startYear,
+                end_year: endYear,
+                deep_search: deepSearch
+            })
         });
         
         const result = await response.json();
@@ -394,7 +402,8 @@ async function searchPapers() {
             currentFilename = result.csv_path.split('/').pop();
             currentData = result.papers;
             
-            showStatus('✅', `成功获取 ${result.count} 篇文献！`);
+            const modeText = result.search_mode === 'deep' ? '深度检索' : '普通检索';
+            showStatus('✅', `${modeText}成功获取 ${result.count} 篇文献！`);
             setTimeout(() => {
                 hideStatus();
                 loadAnalysis(currentFilename);
@@ -856,6 +865,42 @@ function downloadCurrentCsv() {
     document.body.removeChild(a);
 }
 
+async function enrichReferences() {
+    if (!currentFilename) {
+        alert('请先搜索或上传文献数据');
+        return;
+    }
+
+    const status = document.getElementById('referenceEnrichStatus');
+    const button = document.getElementById('enrichReferencesBtn');
+    status.textContent = '正在补全引用信息，引用多的时候会慢一些...';
+    button.disabled = true;
+    button.textContent = '补全中...';
+
+    try {
+        const response = await fetch(`${BASE_PATH}/api/references/${encodeFilename(currentFilename)}/enrich`, {
+            method: 'POST'
+        });
+        const result = await response.json();
+        if (!response.ok || !result.success) {
+            throw new Error(result.detail || '补全失败');
+        }
+
+        const limitNote = result.truncated ? '；引用太多，本次只处理了前一部分' : '';
+        status.textContent =
+            `已补全 ${result.enriched_references} / ${result.unique_references} 条唯一引用，更新 ${result.papers_updated} 篇论文${limitNote}`;
+        await loadAnalysis(currentFilename, {
+            resetFilters: false,
+            activeTab: 'citation'
+        });
+    } catch (error) {
+        status.textContent = '补全引用信息失败: ' + error.message;
+    } finally {
+        button.disabled = false;
+        button.textContent = '补全引用信息';
+    }
+}
+
 function formatNumber(value) {
     const number = Number(value) || 0;
     return number.toLocaleString();
@@ -907,6 +952,7 @@ function buildReportHtml() {
     const topYearByCitations = getPeakRecord(yearlyStats, 'citations');
     const citationNodes = currentCitationNetworkData?.nodes || [];
     const citationEdges = currentCitationNetworkData?.edges || [];
+    const resolvedReferenceCount = citationNodes.reduce((sum, node) => sum + (Number(node.resolved_references) || 0), 0);
     const networkNodes = currentNetworkData?.nodes || [];
     const networkEdges = currentNetworkData?.edges || [];
     const topPapers = (currentData.citation_stats || []).slice(0, 10);
@@ -942,6 +988,7 @@ function buildReportHtml() {
                     <p><strong>被引峰值年份：</strong>${topYearByCitations ? `${escapeHtml(formatYear(topYearByCitations.year))} 年，${formatNumber(topYearByCitations.citations)} 次` : '暂无数据'}</p>
                     <p><strong>合作网络：</strong>${formatNumber(networkNodes.length)} 个作者节点，${formatNumber(networkEdges.length)} 条合作关系。</p>
                     <p><strong>引文网络：</strong>${formatNumber(citationNodes.length)} 个论文节点，${formatNumber(citationEdges.length)} 条集合内引用关系。</p>
+                    <p><strong>引用补全：</strong>${formatNumber(resolvedReferenceCount)} 条参考文献元数据已补全。</p>
                 </div>
             </section>
 
@@ -1560,7 +1607,8 @@ function buildCitationGraphData(nodes, edges) {
                 node.authors || '',
                 `${node.journal || ''} ${year}`.trim(),
                 `总被引: ${citationCount}`,
-                `集合内被引: ${node.internal_citations || 0}`
+                `集合内被引: ${node.internal_citations || 0}`,
+                `已补全参考文献: ${node.resolved_references || 0}`
             ].filter(Boolean).join('\n'),
             category: 0,
             symbolSize
@@ -1652,7 +1700,8 @@ function displayCitationNetwork(data) {
                     缩写: ${escapeHtml(item.shortLabel || '')}<br/>
                     ${escapeHtml(item.authors || '')}<br/>
                     ${escapeHtml(item.journal || '')} ${escapeHtml(formatYear(item.year))}<br/>
-                    被引: ${escapeHtml(item.value || 0)}；集合内被引: ${escapeHtml(item.internal_citations || 0)}
+                    被引: ${escapeHtml(item.value || 0)}；集合内被引: ${escapeHtml(item.internal_citations || 0)}<br/>
+                    已补全参考文献: ${escapeHtml(item.resolved_references || 0)}
                 `;
             }
         },
@@ -1715,6 +1764,12 @@ function renderCitationDetails(nodes, edges) {
         .sort((a, b) => (Number(b.value) || 0) - (Number(a.value) || 0))
         .slice(0, 12);
     const edgeItems = edges.slice(0, 20);
+    const referenceDetails = [];
+    nodes.forEach(node => {
+        (node.reference_details || []).slice(0, 5).forEach(reference => {
+            referenceDetails.push({ source: node, reference });
+        });
+    });
 
     const paperItems = topNodes.map(node => `
         <div class="citation-detail-item">
@@ -1736,6 +1791,16 @@ function renderCitationDetails(nodes, edges) {
         }).join('')
         : '<div class="citation-detail-item">当前集合内部没有匹配到引用边，但上方仍显示论文节点。</div>';
 
+    const referenceHtml = referenceDetails.slice(0, 20).map(item => `
+        <div class="citation-detail-item">
+            <strong>${escapeHtml(item.reference.title || item.reference.id || '未知引用')}</strong>
+            <div class="citation-detail-meta">
+                ${escapeHtml(formatYear(item.reference.year))} · ${escapeHtml(item.reference.journal || '')} · ${escapeHtml(item.reference.authors || '')}
+            </div>
+            <div class="citation-detail-meta">来自：${escapeHtml(item.source.title || item.source.name || '')}</div>
+        </div>
+    `).join('');
+
     container.innerHTML = `
         <div class="citation-detail-panel">
             <h5>高被引节点</h5>
@@ -1744,6 +1809,10 @@ function renderCitationDetails(nodes, edges) {
         <div class="citation-detail-panel">
             <h5>集合内引用关系</h5>
             <div class="citation-detail-list">${edgeHtml}</div>
+        </div>
+        <div class="citation-detail-panel">
+            <h5>已补全参考文献</h5>
+            <div class="citation-detail-list">${referenceHtml || '<div class="citation-detail-item">还没有补全的参考文献信息</div>'}</div>
         </div>
     `;
 }

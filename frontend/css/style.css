@@ -85,6 +85,22 @@ body {
     align-items: flex-end;
 }
 
+.search-option {
+    min-height: 46px;
+    display: inline-flex;
+    align-items: center;
+    gap: 8px;
+    color: #475467;
+    font-weight: 700;
+    cursor: pointer;
+}
+
+.search-option input {
+    width: 18px;
+    height: 18px;
+    accent-color: #667eea;
+}
+
 .input-group {
     flex: 1;
     min-width: 200px;
