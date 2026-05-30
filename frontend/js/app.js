@@ -434,7 +434,8 @@ async function searchPapers() {
             currentData = result.papers;
             
             const modeText = result.search_mode === 'deep' ? '深度检索' : '普通检索';
-            showStatus('✅', `${modeText}在期刊白名单内获取 ${result.count} 篇文献！`);
+            const partialText = result.partial ? `，已达到 ${result.time_budget_seconds || 45} 秒搜索上限` : '';
+            showStatus('✅', `${modeText}在期刊白名单内获取 ${result.count} 篇文献${partialText}！`);
             setTimeout(() => {
                 hideStatus();
                 loadAnalysis(currentFilename);

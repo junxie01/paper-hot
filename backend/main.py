@@ -21,6 +21,7 @@ import re
 import unicodedata
 import secrets
 import html
+import time
 from difflib import SequenceMatcher
 from urllib.parse import quote
 
@@ -58,6 +59,9 @@ ADMIN_PASSWORD_ENV = "PAPERHOT_ADMIN_PASSWORD"
 PAPERHOT_CONTACT_EMAIL_ENV = "PAPERHOT_CONTACT_EMAIL"
 SEMANTIC_SCHOLAR_API_KEY_ENV = "SEMANTIC_SCHOLAR_API_KEY"
 UNPAYWALL_EMAIL_ENV = "UNPAYWALL_EMAIL"
+SEARCH_TIME_BUDGET_SECONDS = 45
+OPENALEX_REQUEST_TIMEOUT_SECONDS = 12
+OPENALEX_MAX_CANDIDATE_PAGES = 6
 SEMANTIC_SCHOLAR_FIELDS = ",".join([
     "paperId",
     "externalIds",
@@ -483,19 +487,22 @@ async def search_papers(payload: SearchRequest, request: Request):
     try:
         paths = get_request_paths(request)
         max_results = max(1, min(payload.max_results, 5000))
+        deadline = time.monotonic() + SEARCH_TIME_BUDGET_SECONDS
         if payload.deep_search:
             papers = fetch_from_openalex_deep(
                 keyword=payload.keyword,
                 max_results=max_results,
                 start_year=payload.start_year,
-                end_year=payload.end_year
+                end_year=payload.end_year,
+                deadline=deadline,
             )
         else:
             papers = fetch_from_openalex(
                 keyword=payload.keyword,
                 max_results=max_results,
                 start_year=payload.start_year,
-                end_year=payload.end_year
+                end_year=payload.end_year,
+                deadline=deadline,
             )
         
         df = pd.DataFrame(papers)
@@ -516,6 +523,8 @@ async def search_papers(payload: SearchRequest, request: Request):
             "csv_path": str(csv_path),
             "search_mode": "deep" if payload.deep_search else "normal",
             "journal_whitelist_count": JOURNAL_WHITELIST_COUNT,
+            "partial": len(papers) < max_results and time.monotonic() >= deadline,
+            "time_budget_seconds": SEARCH_TIME_BUDGET_SECONDS,
         }
         return safe_json_response(result)
     except HTTPException:
@@ -531,21 +540,40 @@ def build_date_filters(start_year: Optional[int], end_year: Optional[int]) -> Li
         filters.append(f"to_publication_date:{end_year}-12-31")
     return filters
 
-def fetch_openalex_works(params: Dict[str, Any], max_results: int, source_label: str) -> List[Dict[str, Any]]:
+def search_budget_remaining(deadline: Optional[float]) -> float:
+    if deadline is None:
+        return SEARCH_TIME_BUDGET_SECONDS
+    return deadline - time.monotonic()
+
+def fetch_openalex_works(
+    params: Dict[str, Any],
+    max_results: int,
+    source_label: str,
+    deadline: Optional[float] = None,
+    max_candidate_pages: int = OPENALEX_MAX_CANDIDATE_PAGES,
+) -> List[Dict[str, Any]]:
     papers = []
     per_page = 200
     page = 1
-    max_candidate_pages = min(50, max(3, int(np.ceil(max_results * 8 / per_page))))
+    max_candidate_pages = max(1, min(max_candidate_pages, OPENALEX_MAX_CANDIDATE_PAGES))
     base_url = "https://api.openalex.org/works"
 
     while len(papers) < max_results and page <= max_candidate_pages:
+        remaining = search_budget_remaining(deadline)
+        if remaining <= 2:
+            break
+
         request_params = {
             **params,
             "per-page": per_page,
             "page": page,
         }
 
-        response = requests.get(base_url, params=request_params, timeout=30)
+        request_timeout = max(3, min(OPENALEX_REQUEST_TIMEOUT_SECONDS, remaining - 1))
+        try:
+            response = requests.get(base_url, params=request_params, timeout=request_timeout)
+        except requests.Timeout:
+            break
         response.raise_for_status()
         data = response.json()
 
@@ -567,12 +595,18 @@ def fetch_openalex_works(params: Dict[str, Any], max_results: int, source_label:
 
     return papers[:max_results]
 
-def fetch_from_openalex(keyword: str, max_results: int, start_year: Optional[int], end_year: Optional[int]):
+def fetch_from_openalex(
+    keyword: str,
+    max_results: int,
+    start_year: Optional[int],
+    end_year: Optional[int],
+    deadline: Optional[float] = None,
+):
     filters = build_date_filters(start_year, end_year)
     params: Dict[str, Any] = {"search": keyword}
     if filters:
         params["filter"] = ",".join(filters)
-    return fetch_openalex_works(params, max_results, "OpenAlex fulltext")
+    return fetch_openalex_works(params, max_results, "OpenAlex fulltext", deadline=deadline)
 
 def build_keyword_variants(keyword: str) -> List[str]:
     base = clean_text(keyword)
@@ -643,18 +677,32 @@ def merge_paper_results(result_sets: List[tuple[str, List[Dict[str, Any]]]], max
     ))
     return records[:max_results]
 
-def fetch_from_openalex_deep(keyword: str, max_results: int, start_year: Optional[int], end_year: Optional[int]):
+def fetch_from_openalex_deep(
+    keyword: str,
+    max_results: int,
+    start_year: Optional[int],
+    end_year: Optional[int],
+    deadline: Optional[float] = None,
+):
     filters = build_date_filters(start_year, end_year)
     result_sets: List[tuple[str, List[Dict[str, Any]]]] = []
     variants = build_keyword_variants(keyword)
-    per_query_limit = min(max_results, max(80, max_results // 2))
+    per_query_limit = min(max_results, max(50, max_results // 3))
 
     for index, term in enumerate(variants):
+        if search_budget_remaining(deadline) <= 4:
+            break
         search_params: Dict[str, Any] = {"search": term}
         if filters:
             search_params["filter"] = ",".join(filters)
         label = "OpenAlex fulltext" if index == 0 else f"OpenAlex fulltext: {term}"
-        result_sets.append((label, fetch_openalex_works(search_params, per_query_limit, label)))
+        result_sets.append((label, fetch_openalex_works(
+            search_params,
+            per_query_limit,
+            label,
+            deadline=deadline,
+            max_candidate_pages=3,
+        )))
 
     primary_term = variants[0] if variants else keyword
     filter_term = primary_term.replace(",", " ")
@@ -662,9 +710,17 @@ def fetch_from_openalex_deep(keyword: str, max_results: int, start_year: Optiona
         ("title.search", "OpenAlex title"),
         ("title_and_abstract.search", "OpenAlex title/abstract"),
     ]:
+        if search_budget_remaining(deadline) <= 4:
+            break
         strategy_filters = [f"{filter_name}:{filter_term}", *filters]
         params = {"filter": ",".join(strategy_filters)}
-        result_sets.append((label, fetch_openalex_works(params, per_query_limit, label)))
+        result_sets.append((label, fetch_openalex_works(
+            params,
+            per_query_limit,
+            label,
+            deadline=deadline,
+            max_candidate_pages=3,
+        )))
 
     return merge_paper_results(result_sets, max_results)
 
@@ -672,7 +728,13 @@ def search_title_from_openalex(title: str, max_results: int = 8) -> List[Dict[st
     params = {
         "filter": f"title.search:{title}",
     }
-    return fetch_openalex_works(params, max_results, "OpenAlex title")
+    return fetch_openalex_works(
+        params,
+        max_results,
+        "OpenAlex title",
+        deadline=time.monotonic() + 20,
+        max_candidate_pages=2,
+    )
 
 @app.post(f"{base_prefix}/api/title-search")
 async def title_search(request: TitleSearchRequest):
