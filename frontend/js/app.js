@@ -57,6 +57,36 @@ function setupDailyMotto() {
     }
 }
 
+async function readJsonResponse(response) {
+    const text = await response.text();
+    const trimmed = text.trim();
+    const looksLikeJson = trimmed.startsWith('{') || trimmed.startsWith('[');
+
+    if (looksLikeJson) {
+        try {
+            const data = JSON.parse(text);
+            if (!response.ok) {
+                throw new Error(data.detail || data.message || `服务器返回 ${response.status}`);
+            }
+            return data;
+        } catch (error) {
+            if (error instanceof SyntaxError) {
+                throw new Error('服务器返回了损坏的 JSON');
+            }
+            throw error;
+        }
+    }
+
+    const snippet = trimmed
+        .replace(/<script[\s\S]*?<\/script>/gi, ' ')
+        .replace(/<style[\s\S]*?<\/style>/gi, ' ')
+        .replace(/<[^>]+>/g, ' ')
+        .replace(/\s+/g, ' ')
+        .slice(0, 180);
+    const statusText = response.status ? `HTTP ${response.status} ${response.statusText || ''}`.trim() : '非 JSON 响应';
+    throw new Error(`${statusText}: ${snippet || '服务器返回了 HTML 或空响应'}`);
+}
+
 function setupEventListeners() {
     document.getElementById('searchBtn').addEventListener('click', searchPapers);
     document.getElementById('uploadBtn').addEventListener('click', () => document.getElementById('fileInput').click());
@@ -354,7 +384,7 @@ async function uploadFile(file) {
             body: formData
         });
         
-        const result = await response.json();
+        const result = await readJsonResponse(response);
         
         if (result.success) {
             currentFilename = result.filename;
@@ -397,7 +427,7 @@ async function searchPapers() {
             })
         });
         
-        const result = await response.json();
+        const result = await readJsonResponse(response);
         
         if (result.success) {
             currentFilename = result.csv_path.split('/').pop();
@@ -428,7 +458,7 @@ async function loadAnalysis(filename, options = {}) {
     try {
         const authorCount = parseInt(document.getElementById('authorCount').value) || 50;
         const response = await fetch(`${BASE_PATH}/api/analysis/${encodeFilename(filename)}?author_count=${authorCount}`);
-        const result = await response.json();
+        const result = await readJsonResponse(response);
         if (!response.ok || !result.success) {
             throw new Error(result.detail || '分析失败');
         }
@@ -471,7 +501,7 @@ async function reloadAuthorChart() {
     
     try {
         const response = await fetch(`${BASE_PATH}/api/analysis/${encodeFilename(currentFilename)}?author_count=${authorCount}`);
-        const result = await response.json();
+        const result = await readJsonResponse(response);
         
         if (result.success) {
             currentData = {
@@ -494,7 +524,7 @@ async function reloadAuthorChart() {
 async function loadPapersList(filename) {
     try {
         const response = await fetch(`${BASE_PATH}/api/papers/${encodeFilename(filename)}`);
-        const result = await response.json();
+        const result = await readJsonResponse(response);
         
         if (result.success) {
             currentPapers = result.papers;
@@ -663,7 +693,7 @@ async function deletePapers(indices) {
             headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify({ indices })
         });
-        const result = await response.json();
+        const result = await readJsonResponse(response);
         if (!response.ok || !result.success) {
             throw new Error(result.detail || result.message || '删除失败');
         }
@@ -694,7 +724,7 @@ async function searchTitleCandidates() {
             headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify({ title, max_results: 8 })
         });
-        const result = await response.json();
+        const result = await readJsonResponse(response);
         if (!response.ok || !result.success) {
             throw new Error(result.detail || '搜索失败');
         }
@@ -744,7 +774,7 @@ async function handleTitleSearchResultClick(event) {
             headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify({ papers: [paper] })
         });
-        const result = await response.json();
+        const result = await readJsonResponse(response);
         if (!response.ok || !result.success) {
             throw new Error(result.detail || '添加失败');
         }
@@ -779,7 +809,7 @@ async function handleAppendCsvSelect(event) {
             method: 'POST',
             body: formData
         });
-        const result = await response.json();
+        const result = await readJsonResponse(response);
         if (!response.ok || !result.success) {
             throw new Error(result.detail || '导入失败');
         }
@@ -817,7 +847,7 @@ async function downloadAllPapers() {
 
         const contentType = response.headers.get('Content-Type') || '';
         if (contentType.includes('application/json')) {
-            const result = await response.json();
+            const result = await readJsonResponse(response);
             if (!result.success) {
                 throw new Error(result.message || '没有可下载的 PDF');
             }
@@ -882,7 +912,7 @@ async function enrichReferences() {
         const response = await fetch(`${BASE_PATH}/api/references/${encodeFilename(currentFilename)}/enrich`, {
             method: 'POST'
         });
-        const result = await response.json();
+        const result = await readJsonResponse(response);
         if (!response.ok || !result.success) {
             throw new Error(result.detail || '补全失败');
         }
@@ -925,7 +955,7 @@ async function enrichMetadata() {
                 unpaywall: true
             })
         });
-        const result = await response.json();
+        const result = await readJsonResponse(response);
         if (!response.ok || !result.success) {
             throw new Error(result.detail || '补全失败');
         }
@@ -1152,7 +1182,7 @@ function downloadReport() {
 async function loadNetwork(filename) {
     try {
         const response = await fetch(`${BASE_PATH}/api/network/${encodeFilename(filename)}`);
-        const result = await response.json();
+        const result = await readJsonResponse(response);
         
         if (result.success) {
             currentNetworkData = result.network;
@@ -1170,7 +1200,7 @@ async function loadNetwork(filename) {
 async function loadCitationNetwork(filename) {
     try {
         const response = await fetch(`${BASE_PATH}/api/citation-network/${encodeFilename(filename)}`);
-        const result = await response.json();
+        const result = await readJsonResponse(response);
 
         if (result.success) {
             currentCitationNetworkData = result.network;
