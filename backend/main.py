@@ -59,7 +59,9 @@ ADMIN_PASSWORD_ENV = "PAPERHOT_ADMIN_PASSWORD"
 PAPERHOT_CONTACT_EMAIL_ENV = "PAPERHOT_CONTACT_EMAIL"
 SEMANTIC_SCHOLAR_API_KEY_ENV = "SEMANTIC_SCHOLAR_API_KEY"
 UNPAYWALL_EMAIL_ENV = "UNPAYWALL_EMAIL"
+OPENCITATIONS_ACCESS_TOKEN_ENV = "OPENCITATIONS_ACCESS_TOKEN"
 SEARCH_TIME_BUDGET_SECONDS = 45
+REFERENCE_ENRICH_TIME_BUDGET_SECONDS = 55
 OPENALEX_REQUEST_TIMEOUT_SECONDS = 12
 OPENALEX_MAX_CANDIDATE_PAGES = 6
 SEMANTIC_SCHOLAR_FIELDS = ",".join([
@@ -1098,25 +1100,121 @@ def fetch_unpaywall_metadata(record: Dict[str, Any]) -> Optional[Dict[str, Any]]
         "source": "Unpaywall",
     }
 
+def reference_identity_from_detail(item: Dict[str, Any]) -> str:
+    doi = normalize_doi(item.get("doi", ""))
+    if doi:
+        return f"doi:{doi}"
+
+    semantic_id = clean_api_text(item.get("semantic_scholar_id", ""))
+    if semantic_id:
+        return f"semantic:{semantic_id.casefold()}"
+
+    openalex_id = clean_api_text(item.get("id", ""))
+    if openalex_id:
+        return f"id:{openalex_id.casefold()}"
+
+    title = normalize_title(item.get("title", ""))
+    if title:
+        return f"title:{title}"
+
+    return ""
+
+def normalize_reference_detail(item: Dict[str, Any]) -> Dict[str, Any]:
+    normalized = {
+        "id": clean_api_text(item.get("id", "")),
+        "doi": normalize_doi(item.get("doi", "")),
+        "title": clean_api_text(item.get("title", "")),
+        "authors": clean_api_text(item.get("authors", "")),
+        "journal": clean_api_text(item.get("journal", "")),
+        "year": item.get("year", ""),
+        "cited_by_count": item.get("cited_by_count", 0),
+        "type": clean_api_text(item.get("type", "")),
+        "source": clean_api_text(item.get("source", "")),
+    }
+    for key in ("semantic_scholar_id", "oci"):
+        value = clean_api_text(item.get(key, ""))
+        if value:
+            normalized[key] = value
+    return normalized
+
+def merge_reference_details(*reference_lists: List[Dict[str, Any]], limit: int = 800) -> List[Dict[str, Any]]:
+    merged: Dict[str, Dict[str, Any]] = {}
+    order = []
+
+    for references in reference_lists:
+        for raw_item in references or []:
+            if not isinstance(raw_item, dict):
+                continue
+            item = normalize_reference_detail(raw_item)
+            identity = reference_identity_from_detail(item)
+            if not identity:
+                continue
+
+            if identity not in merged:
+                merged[identity] = item
+                order.append(identity)
+                continue
+
+            existing = merged[identity]
+            for key, value in item.items():
+                if key == "source":
+                    existing["source"] = merge_search_sources(existing.get("source", ""), value)
+                elif value and not clean_api_text(existing.get(key, "")):
+                    existing[key] = value
+
+    return [merged[key] for key in order[:limit]]
+
 def append_reference_details(existing: Any, incoming: List[Dict[str, Any]]) -> str:
-    details = parse_reference_details(existing)
-    seen = set()
-    merged = []
+    return json.dumps(
+        merge_reference_details(parse_reference_details(existing), incoming or [], limit=800),
+        ensure_ascii=False,
+    )
 
-    for item in [*details, *(incoming or [])]:
-        if not isinstance(item, dict):
-            continue
-        identity = (
-            normalize_doi(item.get("doi", ""))
-            or clean_api_text(item.get("id", "")).casefold()
-            or normalize_title(item.get("title", ""))
-        )
-        if not identity or identity in seen:
-            continue
-        seen.add(identity)
-        merged.append(item)
+def extract_doi_from_pid_string(value: Any) -> str:
+    text = clean_api_text(value)
+    match = re.search(r"doi:([^\s;]+)", text, flags=re.IGNORECASE)
+    return normalize_doi(match.group(1)) if match else ""
 
-    return json.dumps(merged[:500], ensure_ascii=False)
+def opencitations_headers() -> Dict[str, str]:
+    token = os.getenv(OPENCITATIONS_ACCESS_TOKEN_ENV, "").strip()
+    headers = build_request_headers({"Accept": "application/json"})
+    if token:
+        headers["authorization"] = token
+    return headers
+
+def fetch_opencitations_references_by_doi(doi: str, deadline: Optional[float] = None) -> List[Dict[str, Any]]:
+    normalized_doi = normalize_doi(doi)
+    if not normalized_doi or search_budget_remaining(deadline) <= 3:
+        return []
+
+    quoted_doi = quote(normalized_doi, safe="/:._-();")
+    response = requests.get(
+        f"https://api.opencitations.net/index/v2/references/doi:{quoted_doi}",
+        headers=opencitations_headers(),
+        timeout=max(3, min(OPENALEX_REQUEST_TIMEOUT_SECONDS, search_budget_remaining(deadline) - 1)),
+    )
+    if response.status_code == 404:
+        return []
+    response.raise_for_status()
+
+    references = []
+    for row in response.json() or []:
+        cited_doi = extract_doi_from_pid_string(row.get("cited", ""))
+        if not cited_doi:
+            continue
+        references.append({
+            "id": f"doi:{cited_doi}",
+            "doi": cited_doi,
+            "title": "",
+            "authors": "",
+            "journal": "",
+            "year": "",
+            "cited_by_count": 0,
+            "type": "reference",
+            "source": "OpenCitations",
+            "oci": clean_api_text(row.get("oci", "")),
+        })
+    return references
 
 def as_int_or_none(value: Any) -> Optional[int]:
     try:
@@ -1702,11 +1800,16 @@ def build_citation_network(df):
 
     return {"nodes": nodes, "edges": edges}
 
-def fetch_openalex_references_by_ids(reference_ids: List[str]) -> Dict[str, Dict[str, Any]]:
+def fetch_openalex_references_by_ids(
+    reference_ids: List[str],
+    deadline: Optional[float] = None,
+) -> Dict[str, Dict[str, Any]]:
     metadata: Dict[str, Dict[str, Any]] = {}
     base_url = "https://api.openalex.org/works"
 
     for start in range(0, len(reference_ids), 50):
+        if search_budget_remaining(deadline) <= 3:
+            break
         chunk = reference_ids[start:start + 50]
         if not chunk:
             continue
@@ -1715,10 +1818,15 @@ def fetch_openalex_references_by_ids(reference_ids: List[str]) -> Dict[str, Dict
             "filter": f"ids.openalex:{'|'.join(chunk)}",
             "per-page": len(chunk),
         }
-        response = requests.get(base_url, params=params, timeout=30)
+        response = requests.get(
+            base_url,
+            params=params,
+            timeout=max(3, min(OPENALEX_REQUEST_TIMEOUT_SECONDS, search_budget_remaining(deadline) - 1)),
+        )
         response.raise_for_status()
         for work in response.json().get("results", []):
             info = extract_reference_info(work)
+            info["source"] = "OpenAlex"
             openalex_id = str(info.get("id", "")).strip()
             if openalex_id:
                 metadata[openalex_id] = info
@@ -1767,12 +1875,150 @@ def enrich_reference_details_in_df(df: pd.DataFrame, max_unique_references: int 
     }
     return df, stats
 
+def reference_count_by_source(references: List[Dict[str, Any]]) -> Dict[str, int]:
+    counts: Dict[str, int] = {}
+    for reference in references:
+        for source in split_values(reference.get("source", "")):
+            counts[source] = counts.get(source, 0) + 1
+    return counts
+
+def row_record_from_series(row: pd.Series) -> Dict[str, Any]:
+    return {column: row.get(column, "") for column in PAPER_COLUMNS}
+
+def enrich_reference_details_deep_in_df(
+    df: pd.DataFrame,
+    max_papers: int = 300,
+    max_unique_openalex_references: int = 1800,
+) -> tuple[pd.DataFrame, Dict[str, Any]]:
+    df = normalize_papers_df(df).copy()
+    deadline = time.monotonic() + REFERENCE_ENRICH_TIME_BUDGET_SECONDS
+    selected_indices = list(df.index[:max(1, min(max_papers, 1000))])
+    unique_openalex_references = []
+    seen_openalex = set()
+
+    for idx in selected_indices:
+        for reference_id in parse_references(df.at[idx, "references"]):
+            if reference_id not in seen_openalex:
+                unique_openalex_references.append(reference_id)
+                seen_openalex.add(reference_id)
+
+    selected_openalex_references = unique_openalex_references[:max_unique_openalex_references]
+    openalex_metadata = (
+        fetch_openalex_references_by_ids(selected_openalex_references, deadline=deadline)
+        if selected_openalex_references else {}
+    )
+
+    source_hits = {"OpenAlex": len({info.get("id") for info in openalex_metadata.values() if info.get("id")})}
+    source_errors = {"OpenAlex": 0, "Crossref": 0, "Semantic Scholar": 0, "OpenCitations": 0}
+    source_reference_counts = {"OpenAlex": source_hits["OpenAlex"], "Crossref": 0, "Semantic Scholar": 0, "OpenCitations": 0}
+    papers_updated = 0
+    processed_papers = 0
+    all_reference_identities = set()
+    total_reference_details = 0
+    time_limited = False
+
+    for idx in selected_indices:
+        if search_budget_remaining(deadline) <= 4:
+            time_limited = True
+            break
+
+        processed_papers += 1
+        row = df.loc[idx]
+        record = row_record_from_series(row)
+        existing_details = parse_reference_details(row.get("reference_details", ""))
+        openalex_details = [
+            openalex_metadata[reference_id]
+            for reference_id in parse_references(row.get("references", ""))
+            if reference_id in openalex_metadata
+        ]
+        gathered_details = [existing_details, openalex_details]
+        current_reference_count = len(parse_references(row.get("references", "")))
+        row_source_hits = {"Crossref": 0, "Semantic Scholar": 0, "OpenCitations": 0}
+
+        for source_name, fetcher in [
+            ("Crossref", fetch_crossref_metadata),
+            ("Semantic Scholar", fetch_semantic_scholar_metadata),
+        ]:
+            if search_budget_remaining(deadline) <= 4:
+                time_limited = True
+                break
+            try:
+                metadata = fetcher(record)
+            except Exception:
+                source_errors[source_name] += 1
+                continue
+            if not metadata:
+                continue
+            details = metadata.get("reference_details", []) or []
+            if details:
+                gathered_details.append(details)
+                row_source_hits[source_name] += 1
+                source_reference_counts[source_name] += len(details)
+            metadata_reference_count = as_int_or_none(metadata.get("references_count", ""))
+            if metadata_reference_count:
+                current_reference_count = max(current_reference_count, metadata_reference_count)
+
+        doi = normalize_doi(record.get("doi", ""))
+        if doi and search_budget_remaining(deadline) > 4:
+            try:
+                opencitations_details = fetch_opencitations_references_by_doi(doi, deadline=deadline)
+            except Exception:
+                source_errors["OpenCitations"] += 1
+                opencitations_details = []
+            if opencitations_details:
+                gathered_details.append(opencitations_details)
+                row_source_hits["OpenCitations"] += 1
+                source_reference_counts["OpenCitations"] += len(opencitations_details)
+                current_reference_count = max(current_reference_count, len(opencitations_details))
+
+        merged_details = merge_reference_details(*gathered_details, limit=900)
+        previous_details = parse_reference_details(row.get("reference_details", ""))
+        previous_json = json.dumps(previous_details, ensure_ascii=False, sort_keys=True)
+        merged_json = json.dumps(merged_details, ensure_ascii=False, sort_keys=True)
+
+        previous_reference_count = as_int_or_none(row.get("references_count", 0)) or 0
+        if merged_json != previous_json or current_reference_count != previous_reference_count:
+            papers_updated += 1
+            df.at[idx, "reference_details"] = json.dumps(merged_details, ensure_ascii=False)
+            df.at[idx, "references_count"] = max(current_reference_count, len(merged_details))
+
+        for source_name, hit_count in row_source_hits.items():
+            if hit_count:
+                source_hits[source_name] = source_hits.get(source_name, 0) + 1
+
+        total_reference_details += len(merged_details)
+        for reference in merged_details:
+            identity = reference_identity_from_detail(reference)
+            if identity:
+                all_reference_identities.add(identity)
+
+    stats = {
+        "total_references": sum(len(parse_references(row.get("references", ""))) for _, row in df.iterrows()),
+        "unique_references": len(all_reference_identities) or len(unique_openalex_references),
+        "queried_references": len(selected_openalex_references),
+        "enriched_references": len(all_reference_identities),
+        "reference_details": total_reference_details,
+        "papers_updated": papers_updated,
+        "processed_papers": processed_papers,
+        "source_hits": source_hits,
+        "source_errors": source_errors,
+        "source_reference_counts": source_reference_counts,
+        "truncated": (
+            len(unique_openalex_references) > len(selected_openalex_references)
+            or len(df) > len(selected_indices)
+            or time_limited
+        ),
+        "time_limited": time_limited,
+        "time_budget_seconds": REFERENCE_ENRICH_TIME_BUDGET_SECONDS,
+    }
+    return df, stats
+
 @app.post(base_prefix + "/api/references/{filename}/enrich")
 async def enrich_references(filename: str, request: Request):
     try:
         paths = get_request_paths(request)
         df = read_papers_csv(filename, paths["raw"])
-        updated_df, stats = enrich_reference_details_in_df(df)
+        updated_df, stats = enrich_reference_details_deep_in_df(df)
         backup_path = write_papers_csv(
             filename,
             updated_df,

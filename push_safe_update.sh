@@ -4,7 +4,7 @@ set -euo pipefail
 
 cd "$(dirname "$0")"
 
-DEFAULT_MESSAGE="Add multi-source metadata enrichment"
+DEFAULT_MESSAGE="Add deep reference enrichment"
 COMMIT_MESSAGE="${1:-$DEFAULT_MESSAGE}"
 
 echo "Current changes:"

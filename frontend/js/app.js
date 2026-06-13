@@ -912,7 +912,7 @@ async function enrichReferences() {
 
     const status = document.getElementById('referenceEnrichStatus');
     const button = document.getElementById('enrichReferencesBtn');
-    status.textContent = '正在补全引用信息，引用多的时候会慢一些...';
+    status.textContent = '正在深度补全引用：OpenAlex、Crossref、Semantic Scholar、OpenCitations 会依次尝试...';
     button.disabled = true;
     button.textContent = '补全中...';
 
@@ -925,18 +925,27 @@ async function enrichReferences() {
             throw new Error(result.detail || '补全失败');
         }
 
-        const limitNote = result.truncated ? '；引用太多，本次只处理了前一部分' : '';
+        const limitNote = result.time_limited
+            ? `；已达到 ${result.time_budget_seconds || 55} 秒时间上限`
+            : (result.truncated ? '；引用太多，本次只处理了前一部分' : '');
+        const sourceCounts = result.source_reference_counts || {};
+        const sourceText = [
+            `OpenAlex ${sourceCounts.OpenAlex || 0}`,
+            `Crossref ${sourceCounts.Crossref || 0}`,
+            `Semantic Scholar ${sourceCounts['Semantic Scholar'] || 0}`,
+            `OpenCitations ${sourceCounts.OpenCitations || 0}`
+        ].join('，');
         status.textContent =
-            `已补全 ${result.enriched_references} / ${result.unique_references} 条唯一引用，更新 ${result.papers_updated} 篇论文${limitNote}`;
+            `深度补全 ${result.enriched_references} 条唯一引用，更新 ${result.papers_updated} / ${result.processed_papers} 篇论文；${sourceText}${limitNote}`;
         await loadAnalysis(currentFilename, {
             resetFilters: false,
             activeTab: 'citation'
         });
     } catch (error) {
-        status.textContent = '补全引用信息失败: ' + error.message;
+        status.textContent = '深度补全引用失败: ' + error.message;
     } finally {
         button.disabled = false;
-        button.textContent = '补全引用信息';
+        button.textContent = '深度补全引用';
     }
 }
 
