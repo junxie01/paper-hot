@@ -22,6 +22,13 @@
                     <input type="text" id="keyword" placeholder="输入搜索关键词，如：machine learning" />
                 </div>
                 <div class="input-group">
+                    <label for="searchType">搜索方式</label>
+                    <select id="searchType">
+                        <option value="keyword" selected>关键词</option>
+                        <option value="author">作者</option>
+                    </select>
+                </div>
+                <div class="input-group">
                     <label for="maxResults">最大结果数</label>
                     <input type="number" id="maxResults" value="500" min="10" max="5000" />
                 </div>
@@ -309,6 +316,6 @@
         </div>
     </div>
 
-    <script src="/paper-hot/static/js/app.js?v=20260530-2"></script>
+    <script src="/paper-hot/static/js/app.js?v=20260613-1"></script>
 </body>
 </html>

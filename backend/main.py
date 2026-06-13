@@ -151,6 +151,7 @@ class SearchRequest(BaseModel):
     start_year: Optional[int] = None
     end_year: Optional[int] = None
     deep_search: bool = False
+    search_type: str = "keyword"
 
 class TitleSearchRequest(BaseModel):
     title: str
@@ -488,7 +489,16 @@ async def search_papers(payload: SearchRequest, request: Request):
         paths = get_request_paths(request)
         max_results = max(1, min(payload.max_results, 5000))
         deadline = time.monotonic() + SEARCH_TIME_BUDGET_SECONDS
-        if payload.deep_search:
+        search_type = (payload.search_type or "keyword").strip().lower()
+        if search_type == "author":
+            papers = fetch_from_openalex_author(
+                author_name=payload.keyword,
+                max_results=max_results,
+                start_year=payload.start_year,
+                end_year=payload.end_year,
+                deadline=deadline,
+            )
+        elif payload.deep_search:
             papers = fetch_from_openalex_deep(
                 keyword=payload.keyword,
                 max_results=max_results,
@@ -512,7 +522,8 @@ async def search_papers(payload: SearchRequest, request: Request):
         ).strip().replace(" ", "_")
         if not safe_keyword:
             safe_keyword = f"search_{uuid.uuid4().hex[:8]}"
-        filename = f"{safe_keyword}_{'deep_' if payload.deep_search else ''}papers.csv"
+        mode_prefix = "author_" if search_type == "author" else ("deep_" if payload.deep_search else "")
+        filename = f"{safe_keyword}_{mode_prefix}papers.csv"
         filename, csv_path = get_unique_csv_path(filename, paths["raw"])
         write_papers_csv(filename, df, create_backup=False, raw_dir=paths["raw"], backup_dir=paths["backups"])
         
@@ -521,7 +532,7 @@ async def search_papers(payload: SearchRequest, request: Request):
             "count": len(papers),
             "papers": papers,
             "csv_path": str(csv_path),
-            "search_mode": "deep" if payload.deep_search else "normal",
+            "search_mode": search_type if search_type == "author" else ("deep" if payload.deep_search else "normal"),
             "journal_whitelist_count": JOURNAL_WHITELIST_COUNT,
             "partial": len(papers) < max_results and time.monotonic() >= deadline,
             "time_budget_seconds": SEARCH_TIME_BUDGET_SECONDS,
@@ -607,6 +618,80 @@ def fetch_from_openalex(
     if filters:
         params["filter"] = ",".join(filters)
     return fetch_openalex_works(params, max_results, "OpenAlex fulltext", deadline=deadline)
+
+def openalex_id_suffix(value: Any) -> str:
+    text = str(value or "").strip()
+    return text.rsplit("/", 1)[-1] if text else ""
+
+def fetch_openalex_author_candidates(
+    author_name: str,
+    deadline: Optional[float] = None,
+    max_authors: int = 5,
+) -> List[Dict[str, Any]]:
+    if not clean_text(author_name):
+        return []
+    remaining = search_budget_remaining(deadline)
+    if remaining <= 3:
+        return []
+
+    response = requests.get(
+        "https://api.openalex.org/authors",
+        params={
+            "search": author_name,
+            "per-page": max(1, min(max_authors, 10)),
+        },
+        timeout=max(3, min(OPENALEX_REQUEST_TIMEOUT_SECONDS, remaining - 1)),
+    )
+    response.raise_for_status()
+    candidates = response.json().get("results", []) or []
+    query_key = clean_text(author_name).casefold()
+
+    scored = []
+    for candidate in candidates:
+        display_name = clean_text(candidate.get("display_name", ""))
+        score = SequenceMatcher(None, query_key, display_name.casefold()).ratio()
+        if query_key and query_key in display_name.casefold():
+            score += 0.2
+        scored.append((score, candidate))
+
+    scored.sort(
+        key=lambda item: (
+            -item[0],
+            -int(item[1].get("works_count") or 0),
+            clean_text(item[1].get("display_name", "")).casefold(),
+        )
+    )
+    return [candidate for score, candidate in scored if score >= 0.58][:max_authors]
+
+def fetch_from_openalex_author(
+    author_name: str,
+    max_results: int,
+    start_year: Optional[int],
+    end_year: Optional[int],
+    deadline: Optional[float] = None,
+) -> List[Dict[str, Any]]:
+    filters = build_date_filters(start_year, end_year)
+    author_candidates = fetch_openalex_author_candidates(author_name, deadline=deadline)
+    result_sets: List[tuple[str, List[Dict[str, Any]]]] = []
+
+    for author in author_candidates:
+        if search_budget_remaining(deadline) <= 4:
+            break
+        author_id = openalex_id_suffix(author.get("id", ""))
+        if not author_id:
+            continue
+        author_label = clean_text(author.get("display_name", author_id))
+        params = {"filter": ",".join([f"authorships.author.id:{author_id}", *filters])}
+        label = f"OpenAlex author: {author_label}"
+        result_sets.append((label, fetch_openalex_works(
+            params,
+            max_results,
+            label,
+            deadline=deadline,
+            max_candidate_pages=OPENALEX_MAX_CANDIDATE_PAGES,
+        )))
+
+    return merge_paper_results(result_sets, max_results)
 
 def build_keyword_variants(keyword: str) -> List[str]:
     base = clean_text(keyword)

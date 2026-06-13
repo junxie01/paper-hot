@@ -405,6 +405,7 @@ async function searchPapers() {
     const maxResults = parseInt(document.getElementById('maxResults').value) || 500;
     const startYear = document.getElementById('startYear').value ? parseInt(document.getElementById('startYear').value) : null;
     const endYear = document.getElementById('endYear').value ? parseInt(document.getElementById('endYear').value) : null;
+    const searchType = document.getElementById('searchType').value || 'keyword';
     const deepSearch = document.getElementById('deepSearch').checked;
     
     if (!keyword) {
@@ -412,7 +413,10 @@ async function searchPapers() {
         return;
     }
     
-    showStatus('⏳', deepSearch ? '正在深度检索文献，可能需要更久...' : '正在搜索文献...');
+    const searchStatusText = searchType === 'author'
+        ? '正在按作者检索文献...'
+        : (deepSearch ? '正在深度检索文献，可能需要更久...' : '正在搜索文献...');
+    showStatus('⏳', searchStatusText);
     
     try {
         const response = await fetch(`${BASE_PATH}/api/search`, {
@@ -423,7 +427,8 @@ async function searchPapers() {
                 max_results: maxResults,
                 start_year: startYear,
                 end_year: endYear,
-                deep_search: deepSearch
+                deep_search: searchType === 'author' ? false : deepSearch,
+                search_type: searchType
             })
         });
         
@@ -433,7 +438,9 @@ async function searchPapers() {
             currentFilename = result.csv_path.split('/').pop();
             currentData = result.papers;
             
-            const modeText = result.search_mode === 'deep' ? '深度检索' : '普通检索';
+            const modeText = result.search_mode === 'author'
+                ? '作者检索'
+                : (result.search_mode === 'deep' ? '深度检索' : '普通检索');
             const partialText = result.partial ? `，已达到 ${result.time_budget_seconds || 45} 秒搜索上限` : '';
             showStatus('✅', `${modeText}在期刊白名单内获取 ${result.count} 篇文献${partialText}！`);
             setTimeout(() => {
