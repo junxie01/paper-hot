@@ -1807,10 +1807,10 @@ def fetch_openalex_references_by_ids(
     metadata: Dict[str, Dict[str, Any]] = {}
     base_url = "https://api.openalex.org/works"
 
-    for start in range(0, len(reference_ids), 50):
+    for start in range(0, len(reference_ids), 100):
         if search_budget_remaining(deadline) <= 3:
             break
-        chunk = reference_ids[start:start + 50]
+        chunk = reference_ids[start:start + 100]
         if not chunk:
             continue
 
@@ -1903,25 +1903,23 @@ def enrich_reference_details_deep_in_df(
                 seen_openalex.add(reference_id)
 
     selected_openalex_references = unique_openalex_references[:max_unique_openalex_references]
+    openalex_deadline = min(deadline, time.monotonic() + 28)
     openalex_metadata = (
-        fetch_openalex_references_by_ids(selected_openalex_references, deadline=deadline)
+        fetch_openalex_references_by_ids(selected_openalex_references, deadline=openalex_deadline)
         if selected_openalex_references else {}
     )
 
     source_hits = {"OpenAlex": len({info.get("id") for info in openalex_metadata.values() if info.get("id")})}
     source_errors = {"OpenAlex": 0, "Crossref": 0, "Semantic Scholar": 0, "OpenCitations": 0}
     source_reference_counts = {"OpenAlex": source_hits["OpenAlex"], "Crossref": 0, "Semantic Scholar": 0, "OpenCitations": 0}
-    papers_updated = 0
+    updated_indices = set()
     processed_papers = 0
     all_reference_identities = set()
     total_reference_details = 0
     time_limited = False
+    row_context: Dict[int, Dict[str, Any]] = {}
 
     for idx in selected_indices:
-        if search_budget_remaining(deadline) <= 4:
-            time_limited = True
-            break
-
         processed_papers += 1
         row = df.loc[idx]
         record = row_record_from_series(row)
@@ -1933,6 +1931,40 @@ def enrich_reference_details_deep_in_df(
         ]
         gathered_details = [existing_details, openalex_details]
         current_reference_count = len(parse_references(row.get("references", "")))
+        merged_details = merge_reference_details(*gathered_details, limit=900)
+        previous_details = parse_reference_details(row.get("reference_details", ""))
+        previous_json = json.dumps(previous_details, ensure_ascii=False, sort_keys=True)
+        merged_json = json.dumps(merged_details, ensure_ascii=False, sort_keys=True)
+        previous_reference_count = as_int_or_none(row.get("references_count", 0)) or 0
+
+        if merged_json != previous_json or current_reference_count != previous_reference_count:
+            updated_indices.add(idx)
+            df.at[idx, "reference_details"] = json.dumps(merged_details, ensure_ascii=False)
+            df.at[idx, "references_count"] = max(current_reference_count, len(merged_details))
+
+        total_reference_details += len(merged_details)
+        for reference in merged_details:
+            identity = reference_identity_from_detail(reference)
+            if identity:
+                all_reference_identities.add(identity)
+
+        row_context[idx] = {
+            "record": record,
+            "reference_count": max(current_reference_count, len(merged_details)),
+            "details": merged_details,
+        }
+
+    for idx in selected_indices:
+        if search_budget_remaining(deadline) <= 4:
+            time_limited = True
+            break
+
+        context = row_context.get(idx)
+        if not context:
+            continue
+        record = context["record"]
+        current_reference_count = context["reference_count"]
+        gathered_details = [context["details"]]
         row_source_hits = {"Crossref": 0, "Semantic Scholar": 0, "OpenCitations": 0}
 
         for source_name, fetcher in [
@@ -1972,13 +2004,13 @@ def enrich_reference_details_deep_in_df(
                 current_reference_count = max(current_reference_count, len(opencitations_details))
 
         merged_details = merge_reference_details(*gathered_details, limit=900)
-        previous_details = parse_reference_details(row.get("reference_details", ""))
+        previous_details = parse_reference_details(df.at[idx, "reference_details"])
         previous_json = json.dumps(previous_details, ensure_ascii=False, sort_keys=True)
         merged_json = json.dumps(merged_details, ensure_ascii=False, sort_keys=True)
 
-        previous_reference_count = as_int_or_none(row.get("references_count", 0)) or 0
+        previous_reference_count = as_int_or_none(df.at[idx, "references_count"]) or 0
         if merged_json != previous_json or current_reference_count != previous_reference_count:
-            papers_updated += 1
+            updated_indices.add(idx)
             df.at[idx, "reference_details"] = json.dumps(merged_details, ensure_ascii=False)
             df.at[idx, "references_count"] = max(current_reference_count, len(merged_details))
 
@@ -1986,7 +2018,7 @@ def enrich_reference_details_deep_in_df(
             if hit_count:
                 source_hits[source_name] = source_hits.get(source_name, 0) + 1
 
-        total_reference_details += len(merged_details)
+        total_reference_details += max(0, len(merged_details) - len(previous_details))
         for reference in merged_details:
             identity = reference_identity_from_detail(reference)
             if identity:
@@ -1998,7 +2030,7 @@ def enrich_reference_details_deep_in_df(
         "queried_references": len(selected_openalex_references),
         "enriched_references": len(all_reference_identities),
         "reference_details": total_reference_details,
-        "papers_updated": papers_updated,
+        "papers_updated": len(updated_indices),
         "processed_papers": processed_papers,
         "source_hits": source_hits,
         "source_errors": source_errors,
