@@ -147,6 +147,15 @@ PAPER_COLUMNS = [
     "reference_details",
 ]
 
+CSV_COLUMN_ALIASES = {
+    **{re.sub(r"[^a-z0-9]+", "", column.casefold()): column for column in PAPER_COLUMNS},
+    "cites": "cited_by_count",
+    "citations": "cited_by_count",
+    "citationcount": "cited_by_count",
+    "source": "journal",
+    "fulltexturl": "pdf_url",
+}
+
 class SearchRequest(BaseModel):
     keyword: str
     max_results: int = 500
@@ -292,8 +301,35 @@ def top_label_counts(values: List[str], label_key: str, top_n: int) -> List[Dict
     records.sort(key=lambda row: (-row["count"], row[label_key].casefold()))
     return records[:top_n]
 
-def normalize_papers_df(df: pd.DataFrame) -> pd.DataFrame:
+def normalize_csv_column_key(value: Any) -> str:
+    text = unicodedata.normalize("NFKC", str(value or "")).replace("\ufeff", "").casefold()
+    return re.sub(r"[^a-z0-9]+", "", text)
+
+def map_input_csv_columns(df: pd.DataFrame) -> pd.DataFrame:
     df = df.copy()
+    column_keys = {normalize_csv_column_key(column) for column in df.columns}
+    is_publish_or_perish = bool(column_keys & {"gsrank", "querydate", "citesperyear"})
+    available_targets = {column for column in PAPER_COLUMNS if column in df.columns}
+    rename_map = {}
+
+    for column in df.columns:
+        target = CSV_COLUMN_ALIASES.get(normalize_csv_column_key(column))
+        if not target or column == target or target in available_targets:
+            continue
+        rename_map[column] = target
+        available_targets.add(target)
+
+    df = df.rename(columns=rename_map)
+    if is_publish_or_perish and "authors" in df.columns:
+        df["authors"] = df["authors"].apply(
+            lambda value: value
+            if pd.isna(value) or ";" in str(value)
+            else re.sub(r",\s*", "; ", str(value).strip())
+        )
+    return df
+
+def normalize_papers_df(df: pd.DataFrame) -> pd.DataFrame:
+    df = map_input_csv_columns(df)
     for column in PAPER_COLUMNS:
         if column not in df.columns:
             df[column] = ""
@@ -1557,12 +1593,10 @@ def get_concept_stats(df):
 
 def get_citation_stats(df):
     top_cited = df.nlargest(20, "cited_by_count")[["title", "authors", "year", "cited_by_count"]].copy()
-    # 处理NaN值
-    top_cited = top_cited.fillna("")
-    # 转换数字类型
+    for col in ["title", "authors"]:
+        top_cited[col] = top_cited[col].fillna("").astype(str)
     for col in ["year", "cited_by_count"]:
-        if col in top_cited.columns:
-            top_cited[col] = pd.to_numeric(top_cited[col], errors='coerce').fillna(0)
+        top_cited[col] = pd.to_numeric(top_cited[col], errors='coerce').fillna(0)
     records = top_cited.to_dict("records")
     # 确保没有NaN值
     for r in records:
